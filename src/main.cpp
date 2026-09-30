@@ -147,8 +147,6 @@ static SemaphoreHandle_t audioDataSemaphore = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr;
 static TaskHandle_t playbackTaskHandle = nullptr;
 
-static i2s_chan_handle_t i2sTxHandle = nullptr;
-
 static uint32_t lastWifiAttemptMs = 0;
 static uint32_t lastStreamAttemptMs = 0;
 static uint32_t lastOledRefreshMs = 0;
@@ -544,7 +542,7 @@ static void beginMdnsIfNeeded() {
 }
 
 // ============================================================================
-// 10. I2S / UDA1334A
+// 10. I2S / UDA1334A (LEGACY DRIVER)
 // ============================================================================
 
 static bool supportedPcmFormat(const StreamFormat &format) {
@@ -568,12 +566,11 @@ static bool supportedPcmFormat(const StreamFormat &format) {
 }
 
 static void endI2S() {
-  if (i2sTxHandle != nullptr) {
-    i2s_channel_disable(i2sTxHandle);
-    i2s_del_channel(i2sTxHandle);
-    i2sTxHandle = nullptr;
+  if (!i2sReady) {
+    return;
   }
 
+  i2s_driver_uninstall(I2S_NUM_0);
   i2sReady = false;
 }
 
@@ -584,50 +581,59 @@ static bool beginI2S(uint32_t sampleRate, uint16_t channels, uint16_t bitsPerSam
 
   endI2S();
 
-  i2s_chan_config_t channelConfig = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_AUTO, I2S_ROLE_MASTER);
-
-  if (i2s_new_channel(&channelConfig, &i2sTxHandle, nullptr) != ESP_OK) {
-    i2sTxHandle = nullptr;
-    return false;
-  }
-
-  i2s_std_config_t stdConfig = {
-    .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(sampleRate),
-    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(
-      I2S_DATA_BIT_WIDTH_16BIT,
-      channels == 2 ? I2S_SLOT_MODE_STEREO : I2S_SLOT_MODE_MONO
-    ),
-    .gpio_cfg = {
-      .mclk = I2S_GPIO_UNUSED,
-      .bclk = (gpio_num_t)I2S_BCLK_PIN,
-      .ws = (gpio_num_t)I2S_LRCLK_PIN,
-      .dout = (gpio_num_t)I2S_DOUT_PIN,
-      .din = I2S_GPIO_UNUSED,
-      .invert_flags = {
-        .mclk_inv = false,
-        .bclk_inv = false,
-        .ws_inv = false
-      }
-    }
+  i2s_config_t i2sConfig = {
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
+    .sample_rate = sampleRate,
+    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .channel_format = channels == 2 ? I2S_CHANNEL_FMT_RIGHT_LEFT : I2S_CHANNEL_FMT_ONLY_LEFT,
+    .communication_format = I2S_COMM_FORMAT_STAND_I2S,
+    .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
+    .dma_buf_count = 8,
+    .dma_buf_len = 256,
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
+    .fixed_mclk = I2S_PIN_NO_CHANGE
   };
 
-  if (i2s_channel_init_std_mode(i2sTxHandle, &stdConfig) != ESP_OK) {
-    endI2S();
+  esp_err_t result = i2s_driver_install(I2S_NUM_0, &i2sConfig, 0, nullptr);
+  if (result != ESP_OK) {
+    Serial.printf("[I2S] install failed: %d
+", result);
     return false;
   }
 
-  if (i2s_channel_enable(i2sTxHandle) != ESP_OK) {
-    endI2S();
+  i2s_pin_config_t pinConfig = {
+    .bck_io_num = I2S_BCLK_PIN,
+    .ws_io_num = I2S_LRCLK_PIN,
+    .data_out_num = I2S_DOUT_PIN,
+    .data_in_num = I2S_PIN_NO_CHANGE,
+    .mck_io_num = I2S_PIN_NO_CHANGE
+  };
+
+  result = i2s_set_pin(I2S_NUM_0, &pinConfig);
+  if (result != ESP_OK) {
+    Serial.printf("[I2S] set_pin failed: %d
+", result);
+    i2s_driver_uninstall(I2S_NUM_0);
+    return false;
+  }
+
+  result = i2s_set_clk(I2S_NUM_0, sampleRate, I2S_BITS_PER_SAMPLE_16BIT,
+                       channels == 2 ? I2S_CHANNEL_STEREO : I2S_CHANNEL_MONO);
+  if (result != ESP_OK) {
+    Serial.printf("[I2S] set_clk failed: %d
+", result);
+    i2s_driver_uninstall(I2S_NUM_0);
     return false;
   }
 
   i2sReady = true;
 
-  Serial.printf("[I2S] %lu Hz, %u-bit, %u channel(s), BCLK=%d WS=%d DOUT=%d
+  Serial.printf("[I2S] %lu Hz, %u-bit, %s, BCLK=%d WS=%d DOUT=%d
 ",
                 (unsigned long)sampleRate,
                 bitsPerSample,
-                channels,
+                channels == 2 ? "Stereo" : "Mono",
                 I2S_BCLK_PIN,
                 I2S_LRCLK_PIN,
                 I2S_DOUT_PIN);
@@ -954,7 +960,7 @@ static void playbackTask(void *parameter) {
   uint8_t output[I2S_WRITE_BYTES];
 
   for (;;) {
-    if (!i2sReady || i2sTxHandle == nullptr || !bufferStarted) {
+    if (!i2sReady || !bufferStarted) {
       vTaskDelay(pdMS_TO_TICKS(10));
       continue;
     }
@@ -974,8 +980,8 @@ static void playbackTask(void *parameter) {
     }
 
     size_t written = 0;
-    esp_err_t result = i2s_channel_write(
-      i2sTxHandle,
+    esp_err_t result = i2s_write(
+      I2S_NUM_0,
       output,
       count,
       &written,
