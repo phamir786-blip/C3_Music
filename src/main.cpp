@@ -26,8 +26,8 @@
 // 01. EDIT ONLY THESE VALUES BEFORE FIRST FLASH
 // ============================================================================
 
-static const char WIFI_SSID[] = "YOUR_WIFI_NAME";
-static const char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD";
+static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
+static const char WIFI_PASSWORD[] = "006BF4FD";
 static const char PHONE_HOST[] = "192.168.1.100";
 
 // ============================================================================
@@ -673,6 +673,7 @@ static bool readExact(WiFiClient &client, uint8_t *buffer, size_t length, uint32
   return received == length;
 }
 
+static bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs) {
 static bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs) {
   line = "";
   uint32_t started = millis();
