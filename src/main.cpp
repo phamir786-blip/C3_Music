@@ -683,8 +683,9 @@ static bool readLine(WiFiClient &client, String &line, uint32_t timeoutMs) {
       char c = (char)client.read();
       line += c;
 
-      if (line.endsWith("
-        ")) {
+      if (line.endsWith(String("
+") + "
+")) {
         return true;
       }
 
