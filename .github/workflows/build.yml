@@ -139,7 +139,7 @@ jobs:
           )
 
           python -m pip install "esptool==4.5.1"
-          esptool.py merge_bin "${MERGE_ARGS[@]}"
+          esptool.py --chip esp32c3 merge_bin "${MERGE_ARGS[@]}"
 
           if [ ! -f "$ARTIFACT_DIR/merged.bin" ]; then
             echo "::error::merged.bin was not created"
