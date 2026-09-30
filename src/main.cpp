@@ -437,12 +437,12 @@ static bool connectHttpWav() {
 }
 
 static void playbackTask(void*) {
-  uint8_t in[I2S_WRITE_BYTES];
-  uint8_t out[I2S_WRITE_BYTES * 2];
+  uint8_t in[I2S_WRITE_BYTES / 2];
+  uint8_t out[I2S_WRITE_BYTES];
   for(;;){
     if (!i2sReady||!bufferStarted){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-    size_t want = (streamFormat.channels==1) ? I2S_WRITE_BYTES : I2S_WRITE_BYTES;
+    size_t want = I2S_WRITE_BYTES / 2;
     size_t n = ringRead(in, want);
     if (n==0){
       stats.underruns++;
