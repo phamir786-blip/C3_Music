@@ -19,7 +19,7 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <U8g2lib.h>
-#include <driver/i2s_std.h>
+#include <driver/i2s.h>
 
 // ============================================================================
 // 01. EDIT ONLY THESE VALUES BEFORE FIRST FLASH
