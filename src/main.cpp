@@ -274,6 +274,8 @@ static void displayUpdate() {
   oled.sendBuffer();
 }
 
+static void beginMdnsIfNeeded();
+
 static void connectWifiIfNeeded() {
   if (WiFi.status()==WL_CONNECTED) { beginMdnsIfNeeded(); return; }
   if (millis()-lastWifiAttemptMs < WIFI_RETRY_MS) return;
@@ -310,7 +312,7 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
     .use_apll = false, .tx_desc_auto_clear = true, .fixed_mclk = I2S_PIN_NO_CHANGE
   };
   if (i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr)!=ESP_OK) return false;
-  i2s_pin_config_t pin = { .bck_io_num=I2S_BCLK_PIN, .ws_io_num=I2S_LRCLK_PIN, .data_out_num=I2S_DOUT_PIN, .data_in_num=I2S_PIN_NO_CHANGE, .mck_io_num=I2S_PIN_NO_CHANGE };
+  i2s_pin_config_t pin = { I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN, I2S_PIN_NO_CHANGE, I2S_PIN_NO_CHANGE };
   if (i2s_set_pin(I2S_NUM_0,&pin)!=ESP_OK) { endI2S(); return false; }
   if (i2s_set_clk(I2S_NUM_0,sr,I2S_BITS_PER_SAMPLE_16BIT,ch==2?I2S_CHANNEL_STEREO:I2S_CHANNEL_MONO)!=ESP_OK) { endI2S(); return false; }
   i2sReady=true;
@@ -470,8 +472,8 @@ static String makeStatusJson(){
   r+="\"state\":\""+String(receiverStateName(receiverState))+"\",";
   r+="\"stateCode\":"+String((int)receiverState)+",";
   r+="\"mode\":\""+String(streamModeName(settings.preferredMode))+"\",";
-  r+="\"streamEnabled\":"+(settings.streamEnabled?"true":"false")+",";
-  r+="\"wifiConnected\":"+(WiFi.status()==WL_CONNECTED?"true":"false")+",";
+  r+="\"streamEnabled\":"+String(settings.streamEnabled?"true":"false")+",";
+  r+="\"wifiConnected\":"+String(WiFi.status()==WL_CONNECTED?"true":"false")+",";
   r+="\"ssid\":\""+jsonEscape(ssid)+"\",";
   r+="\"ip\":\""+jsonEscape(ip)+"\",";
   r+="\"hostname\":\""+String(MDNS_HOSTNAME)+".local\",";
@@ -493,7 +495,7 @@ static String makeStatusJson(){
   r+="\"sessionSeconds\":"+String(sess)+",";
   r+="\"heap\":"+String(ESP.getFreeHeap())+",";
   r+="\"flashSize\":"+String(ESP.getFlashChipSize())+",";
-  r+="\"oled\":"+(settings.oledEnabled?"true":"false")+",";
+  r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
   r+="\"lastError\":\""+jsonEscape(stats.lastError)+"\"";
   r+="}";
   return r;
@@ -505,11 +507,11 @@ static String makeConfigJson(){
   r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
-  r+="\"mode\":\""+(settings.preferredMode==STREAM_MODE_HTTP?"http":"tcp")+"\",";
-  r+="\"autoFallback\":"+(settings.autoFallback?"true":"false")+",";
-  r+="\"autoReconnect\":"+(settings.autoReconnect?"true":"false")+",";
-  r+="\"oled\":"+(settings.oledEnabled?"true":"false")+",";
-  r+="\"streamEnabled\":"+(settings.streamEnabled?"true":"false")+",";
+  r+="\"mode\":\""+String(settings.preferredMode==STREAM_MODE_HTTP?"http":"tcp")+"\",";
+  r+="\"autoFallback\":"+String(settings.autoFallback?"true":"false")+",";
+  r+="\"autoReconnect\":"+String(settings.autoReconnect?"true":"false")+",";
+  r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
+  r+="\"streamEnabled\":"+String(settings.streamEnabled?"true":"false")+",";
   r+="\"bufferMs\":"+String(settings.targetBufferMs)+",";
   r+="\"i2s\":{\"bclk\":"+String(I2S_BCLK_PIN)+",\"lrclk\":"+String(I2S_LRCLK_PIN)+",\"dout\":"+String(I2S_DOUT_PIN)+"}";
   r+="}";
