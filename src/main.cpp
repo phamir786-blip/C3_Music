@@ -19,14 +19,15 @@
 #include <Preferences.h>
 #include <Update.h>
 #include <U8g2lib.h>
+#include <Wire.h>
 #include <driver/i2s.h>
 
 // ============================================================================
 // 01. EDIT ONLY THESE VALUES BEFORE FIRST FLASH
 // ============================================================================
 
-static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
-static const char WIFI_PASSWORD[] = "006BF4FD";
+static const char WIFI_SSID[] = "YOUR_WIFI_NAME";
+static const char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD";
 static const char PHONE_HOST[] = "192.168.1.100";
 
 // ============================================================================
@@ -359,7 +360,8 @@ static size_t ringRead(uint8_t *output, size_t maxLength) {
 
   portENTER_CRITICAL(&ringMux);
 
-  size_t length = min(maxLength, ringCount);
+  size_t localCount = ringCount;
+  size_t length = min(maxLength, localCount);
 
   if (length > 0) {
     size_t firstPart = min(length, AUDIO_RING_BYTES - ringReadIndex);
