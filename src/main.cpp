@@ -100,6 +100,8 @@ static uint8_t audioRing[AUDIO_RING_BYTES];
 static volatile size_t ringReadIndex = 0, ringWriteIndex = 0, ringCount = 0;
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t audioDataSemaphore = nullptr;
+static SemaphoreHandle_t i2sMux = nullptr;
+static SemaphoreHandle_t streamClientMux = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr, playbackTaskHandle = nullptr;
 static uint32_t lastWifiAttemptMs = 0, lastStreamAttemptMs = 0, lastOledRefreshMs = 0, lastStatusRefreshMs = 0;
 static bool mdnsStarted = false;
@@ -296,7 +298,29 @@ static bool supportedPcmFormat(const StreamFormat &f) {
   return f.audioFormat==1 && f.bitsPerSample==16 && (f.channels==1||f.channels==2) && f.sampleRate>=8000 && f.sampleRate<=96000;
 }
 
-static void endI2S() { if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; } }
+static void endI2S() {
+  if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
+  if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
+  if (i2sMux) xSemaphoreGive(i2sMux);
+}
+
+static uint32_t targetPrebufferBytes() {
+  uint64_t bytesPerSecond = (uint64_t)streamFormat.sampleRate *
+                            (uint64_t)streamFormat.channels *
+                            (uint64_t)(streamFormat.bitsPerSample / 8);
+  if (bytesPerSecond == 0) bytesPerSecond =
+      (uint64_t)DEFAULT_SAMPLE_RATE * DEFAULT_CHANNELS * (DEFAULT_BITS_PER_SAMPLE / 8);
+  uint64_t bytes = (bytesPerSecond * settings.targetBufferMs) / 1000ULL;
+  if (bytes < 4096) bytes = 4096;
+  if (bytes > AUDIO_RING_BYTES - 4096) bytes = AUDIO_RING_BYTES - 4096;
+  return (uint32_t)bytes;
+}
+
+static void stopStreamClient() {
+  if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
+  streamClient.stop();
+  if (streamClientMux) xSemaphoreGive(streamClientMux);
+}
 
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   if (bits!=16 || (ch!=1 && ch!=2)) return false;
@@ -305,7 +329,7 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
     .sample_rate = sr,
     .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
-    .channel_format = ch==2 ? I2S_CHANNEL_FMT_RIGHT_LEFT : I2S_CHANNEL_FMT_ONLY_LEFT,
+    .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 8, .dma_buf_len = 256,
@@ -314,7 +338,7 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   if (i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr)!=ESP_OK) return false;
   i2s_pin_config_t pin = { I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN, I2S_PIN_NO_CHANGE, I2S_PIN_NO_CHANGE };
   if (i2s_set_pin(I2S_NUM_0,&pin)!=ESP_OK) { endI2S(); return false; }
-  if (i2s_set_clk(I2S_NUM_0,sr,I2S_BITS_PER_SAMPLE_16BIT,ch==2?I2S_CHANNEL_STEREO:I2S_CHANNEL_MONO)!=ESP_OK) { endI2S(); return false; }
+  if (i2s_set_clk(I2S_NUM_0,sr,I2S_BITS_PER_SAMPLE_16BIT,I2S_CHANNEL_STEREO)!=ESP_OK) { endI2S(); return false; }
   i2sReady=true;
   Serial.printf("[I2S] %lu Hz, %u-bit, %s, BCLK=%d WS=%d DOUT=%d\n", (unsigned long)sr, bits, ch==2?"Stereo":"Mono", I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   return true;
@@ -413,13 +437,40 @@ static bool connectHttpWav() {
 }
 
 static void playbackTask(void*) {
-  uint8_t out[I2S_WRITE_BYTES];
+  uint8_t in[I2S_WRITE_BYTES];
+  uint8_t out[I2S_WRITE_BYTES * 2];
   for(;;){
     if (!i2sReady||!bufferStarted){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-    size_t n=ringRead(out,sizeof(out));
-    if (n==0){ stats.underruns++; bufferStarted=false; if (receiverState==RX_STREAMING) setReceiverState(RX_BUFFERING,"Buffer low"); vTaskDelay(pdMS_TO_TICKS(4)); continue; }
-    size_t w=0; esp_err_t r=i2s_write(I2S_NUM_0,out,n,&w,pdMS_TO_TICKS(80));
-    if (r==ESP_OK && w>0) stats.bytesPlayed+=w; else vTaskDelay(pdMS_TO_TICKS(2));
+
+    size_t want = (streamFormat.channels==1) ? I2S_WRITE_BYTES : I2S_WRITE_BYTES;
+    size_t n = ringRead(in, want);
+    if (n==0){
+      stats.underruns++;
+      bufferStarted=false;
+      if (receiverState==RX_STREAMING) setReceiverState(RX_BUFFERING,"Buffer low");
+      vTaskDelay(pdMS_TO_TICKS(4));
+      continue;
+    }
+
+    const uint8_t *writeBuf = in;
+    size_t writeLen = n;
+    if (streamFormat.channels==1) {
+      size_t samples = n / 2;
+      int16_t *src = reinterpret_cast<int16_t*>(in);
+      int16_t *dst = reinterpret_cast<int16_t*>(out);
+      for (size_t i=0;i<samples;i++) { dst[i*2]=src[i]; dst[i*2+1]=src[i]; }
+      writeBuf = out;
+      writeLen = samples * 4;
+    }
+
+    if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
+    bool ready = i2sReady;
+    size_t w=0;
+    esp_err_t r = ready ? i2s_write(I2S_NUM_0,writeBuf,writeLen,&w,pdMS_TO_TICKS(80)) : ESP_FAIL;
+    if (i2sMux) xSemaphoreGive(i2sMux);
+
+    if (r==ESP_OK && w>0) stats.bytesPlayed += (streamFormat.channels==1) ? (w/2) : w;
+    else vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
 
@@ -428,21 +479,21 @@ static void runConnectedStream() {
   stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
     int av=streamClient.available();
-    if (av>0){ size_t w=min((size_t)av,sizeof(in)); int n=streamClient.read(in,w); if (n>0){ stats.bytesReceived+=n; stats.lastReceiveMs=millis(); if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(3)); if (!bufferStarted && ringSize()>=PREBUFFER_BYTES){ bufferStarted=true; setReceiverState(RX_STREAMING); } } }
+    if (av>0){ size_t w=min((size_t)av,sizeof(in)); int n=streamClient.read(in,w); if (n>0){ stats.bytesReceived+=n; stats.lastReceiveMs=millis(); if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(3)); if (!bufferStarted && ringSize()>=targetPrebufferBytes()){ bufferStarted=true; setReceiverState(RX_STREAMING); } } }
     else { if (millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS){ stats.lastError="Stream timeout"; break; } vTaskDelay(pdMS_TO_TICKS(1)); }
   }
 }
 
 static void streamTask(void*) {
   for(;;){
-    if (WiFi.status()!=WL_CONNECTED){ streamClient.stop(); endI2S(); ringClear(); if (settings.streamEnabled && !stopRequested) setReceiverState(RX_WIFI_OFFLINE,"WiFi disconnected"); vTaskDelay(pdMS_TO_TICKS(500)); continue; }
+    if (WiFi.status()!=WL_CONNECTED){ stopStreamClient(); endI2S(); ringClear(); if (settings.streamEnabled && !stopRequested) setReceiverState(RX_WIFI_OFFLINE,"WiFi disconnected"); vTaskDelay(pdMS_TO_TICKS(500)); continue; }
     if (!settings.streamEnabled||stopRequested){ streamClient.stop(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
     if (millis()-lastStreamAttemptMs<STREAM_RETRY_MS){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
     lastStreamAttemptMs=millis();
     bool ok=false; StreamMode tr=settings.preferredMode;
     if (tr==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     if (!ok && settings.autoFallback && !stopRequested){
-      streamClient.stop(); endI2S(); ringClear();
+      stopStreamClient(); endI2S(); ringClear();
       StreamMode fb=(tr==STREAM_MODE_TCP)?STREAM_MODE_HTTP:STREAM_MODE_TCP;
       Serial.printf("[STREAM] Primary failed; trying %s\n",streamModeName(fb));
       if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
@@ -450,13 +501,27 @@ static void streamTask(void*) {
     if (ok){ stats.reconnects++; runConnectedStream(); }
     else { stats.streamErrors++; setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable"); }
     streamClient.stop(); endI2S(); ringClear();
-    if (!stopRequested && settings.streamEnabled && settings.autoReconnect) vTaskDelay(pdMS_TO_TICKS(STREAM_RETRY_MS)); else vTaskDelay(pdMS_TO_TICKS(100));
+    if (!stopRequested && settings.streamEnabled && settings.autoReconnect) {
+      vTaskDelay(pdMS_TO_TICKS(STREAM_RETRY_MS));
+    } else {
+      if (!stopRequested && settings.streamEnabled && !settings.autoReconnect) {
+        setReceiverState(RX_ERROR, stats.lastError.length() ? stats.lastError : "Auto reconnect disabled");
+      }
+      vTaskDelay(pdMS_TO_TICKS(250));
+    }
   }
 }
 
-static void startStreaming(){ stopRequested=false; settings.streamEnabled=true; saveSettings(); setReceiverState(RX_IDLE); }
-static void stopStreaming(){ stopRequested=true; settings.streamEnabled=false; saveSettings(); streamClient.stop(); ringClear(); endI2S(); setReceiverState(RX_STOPPED); }
-static void reconnectStreaming(){ stopRequested=true; streamClient.stop(); ringClear(); endI2S(); delay(100); stopRequested=false; settings.streamEnabled=true; saveSettings(); setReceiverState(RX_IDLE); }
+static void startStreaming(){
+  stopRequested=false; settings.streamEnabled=true; lastStreamAttemptMs=0; saveSettings(); setReceiverState(RX_IDLE);
+}
+static void stopStreaming(){
+  stopRequested=true; settings.streamEnabled=false; saveSettings(); stopStreamClient(); ringClear(); endI2S(); setReceiverState(RX_STOPPED);
+}
+static void reconnectStreaming(){
+  stopRequested=true; stopStreamClient(); ringClear(); endI2S(); delay(100);
+  stopRequested=false; settings.streamEnabled=true; lastStreamAttemptMs=0; saveSettings(); setReceiverState(RX_IDLE);
+}
 
 static String jsonEscape(const String &in){ String o; o.reserve(in.length()+8); for(size_t i=0;i<in.length();++i){ char c=in[i]; switch(c){ case'\\':o+="\\\\";break; case'"':o+="\\\"";break; case'\n':o+="\\n";break; case'\r':o+="\\r";break; case'\t':o+="\\t";break; default: if((uint8_t)c>=0x20)o+=c; } } return o; }
 
@@ -528,7 +593,7 @@ static String htmlPage(){
 static bool otaUploadFailed=false; static String otaUploadError;
 static void handleFirmwareUpload(){
   HTTPUpload &up=server.upload();
-  if (up.status==UPLOAD_FILE_START){ otaUploadFailed=false; otaUploadError=""; stopRequested=true; streamClient.stop(); ringClear(); endI2S(); setReceiverState(RX_UPDATING); size_t sz=UPDATE_SIZE_UNKNOWN; if (!Update.begin(sz,U_FLASH)){ otaUploadFailed=true; otaUploadError=Update.errorString(); Serial.printf("[OTA] Begin failed: %s\n",otaUploadError.c_str()); } else Serial.printf("[OTA] Start: %s\n",up.filename.c_str()); }
+  if (up.status==UPLOAD_FILE_START){ otaUploadFailed=false; otaUploadError=""; stopRequested=true; stopStreamClient(); ringClear(); endI2S(); setReceiverState(RX_UPDATING); size_t sz=UPDATE_SIZE_UNKNOWN; if (!Update.begin(sz,U_FLASH)){ otaUploadFailed=true; otaUploadError=Update.errorString(); Serial.printf("[OTA] Begin failed: %s\n",otaUploadError.c_str()); } else Serial.printf("[OTA] Start: %s\n",up.filename.c_str()); }
   else if (up.status==UPLOAD_FILE_WRITE){ if (!otaUploadFailed){ size_t w=Update.write(up.buf,up.currentSize); if (w!=up.currentSize){ otaUploadFailed=true; otaUploadError=Update.errorString(); Serial.printf("[OTA] Write failed: %s\n",otaUploadError.c_str()); } } }
   else if (up.status==UPLOAD_FILE_END){ if (!otaUploadFailed){ if (!Update.end(true)){ otaUploadFailed=true; otaUploadError=Update.errorString(); Serial.printf("[OTA] End failed: %s\n",otaUploadError.c_str()); } else Serial.printf("[OTA] Success: %u bytes\n",up.totalSize); } }
   else if (up.status==UPLOAD_FILE_ABORTED){ otaUploadFailed=true; otaUploadError="Upload aborted"; Update.abort(); }
@@ -553,7 +618,7 @@ static void setupWebServer(){
   server.on("/api/stream/start",HTTP_POST,[]{ if(!requirePost())return; startStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/stop",HTTP_POST,[]{ if(!requirePost())return; stopStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/reconnect",HTTP_POST,[]{ if(!requirePost())return; reconnectStreaming(); sendJson(200,"{\"ok\":true}"); });
-  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; WiFi.disconnect(false,false); mdnsStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
+  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; WiFi.disconnect(false,false); stopStreamClient(); mdnsStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/clear-stats",HTTP_POST,[]{ if(!requirePost())return; stats=RuntimeStats(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/reboot",HTTP_POST,[]{ if(!requirePost())return; sendJson(200,"{\"ok\":true,\"message\":\"Restarting\"}"); delay(250); ESP.restart(); });
   server.on("/api/system/factory-reset",HTTP_POST,[]{ if(!requirePost())return; resetSettings(); sendJson(200,"{\"ok\":true,\"message\":\"Reset; restarting\"}"); delay(250); ESP.restart(); });
@@ -570,6 +635,8 @@ void setup(){
   Serial.println("============================================================");
   loadSettings();
   audioDataSemaphore=xSemaphoreCreateBinary();
+  i2sMux=xSemaphoreCreateMutex();
+  streamClientMux=xSemaphoreCreateMutex();
   displayBegin(); setReceiverState(RX_BOOTING);
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setAutoReconnect(true);
   setupWebServer();
@@ -584,6 +651,11 @@ void loop(){
   if (WiFi.status()!=WL_CONNECTED){ mdnsStarted=false; if (receiverState!=RX_WIFI_CONNECTING&&receiverState!=RX_UPDATING&&settings.streamEnabled) setReceiverState(RX_WIFI_OFFLINE); connectWifiIfNeeded(); }
   else beginMdnsIfNeeded();
   displayUpdate();
-  if (millis()-lastStatusRefreshMs>=STATUS_REFRESH_MS){ lastStatusRefreshMs=millis(); if (receiverState==RX_STREAMING&&ringSize()<(PREBUFFER_BYTES/8)) setReceiverState(RX_BUFFERING,"Buffer low"); else if (receiverState==RX_BUFFERING&&bufferStarted&&ringSize()>=(PREBUFFER_BYTES/2)) setReceiverState(RX_STREAMING); }
+  if (millis()-lastStatusRefreshMs>=STATUS_REFRESH_MS){
+    lastStatusRefreshMs=millis();
+    uint32_t target=targetPrebufferBytes();
+    if (receiverState==RX_STREAMING&&ringSize()<(target/8)) setReceiverState(RX_BUFFERING,"Buffer low");
+    else if (receiverState==RX_BUFFERING&&bufferStarted&&ringSize()>=(target/2)) setReceiverState(RX_STREAMING);
+  }
   delay(2);
 }
