@@ -726,7 +726,7 @@ h1{font-size:18px;line-height:1.15;margin:0;font-weight:760;letter-spacing:-.02e
 .chip:before{content:"";width:6px;height:6px;border-radius:50%;background:#777}.chip.ok:before{background:var(--good);box-shadow:0 0 8px rgba(185,246,197,.45)}.chip.bad:before{background:var(--bad)}
 main{max-width:760px;margin:auto;padding:18px 14px}.tab{display:none;animation:enter .18s ease-out}.tab.active{display:block}
 @keyframes enter{from{opacity:.65;transform:translateY(4px)}to{opacity:1;transform:none}}
-.card{background:linear-gradient(180deg,#0b0b0b,#070707);border:1px solid var(--line);border-radius:var(--radius);padding:18px;margin-bottom:12px;box-shadow:0 12px 34px rgba(0,0,0,.3)}
+.card{background:linear-gradient(180deg,#0b0b0b,#070707);border:1px solid rgba(255,255,255,.075);border-radius:var(--radius);padding:18px;margin-bottom:12px;box-shadow:0 12px 34px rgba(0,0,0,.3),0 0 18px rgba(255,255,255,.018),inset 0 1px 0 rgba(255,255,255,.025);position:relative;overflow:hidden}.card:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(135deg,rgba(255,255,255,.018),transparent 42%,rgba(255,255,255,.008));}
 .card.tight{padding:14px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px}
 h2{font-size:17px;margin:0;font-weight:720;letter-spacing:-.015em}h3{font-size:14px;margin:0;font-weight:680}
 .hero{font-size:31px;font-weight:800;letter-spacing:-.04em;margin:3px 0 5px;line-height:1.1}.muted{color:var(--muted)}
