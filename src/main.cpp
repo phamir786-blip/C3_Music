@@ -475,8 +475,8 @@ static bool connectHttpWav() {
 }
 
 static void playbackTask(void*) {
-  alignas(4) int16_t in[I2S_WRITE_BYTES / sizeof(int16_t)];
-  alignas(4) int16_t out[I2S_WRITE_BYTES / sizeof(int16_t) * 2];
+  static alignas(4) int16_t in[I2S_WRITE_BYTES / sizeof(int16_t)];
+  static alignas(4) int16_t out[I2S_WRITE_BYTES / sizeof(int16_t) * 2];
   uint32_t lastAudioDiagMs = 0;
   uint16_t peak = 0;
 
