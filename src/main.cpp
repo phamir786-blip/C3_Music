@@ -475,67 +475,41 @@ static bool connectHttpWav() {
 }
 
 static void playbackTask(void*) {
-  static alignas(4) int16_t in[I2S_WRITE_BYTES / sizeof(int16_t)];
-  static alignas(4) int16_t out[I2S_WRITE_BYTES / sizeof(int16_t) * 2];
-  uint32_t lastAudioDiagMs = 0;
-  uint16_t peak = 0;
-
+  uint8_t in[I2S_WRITE_BYTES / 2];
+  uint8_t out[I2S_WRITE_BYTES];
   for(;;){
     if (!i2sReady||!bufferStarted){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-    const size_t frameBytes = (streamFormat.channels==2) ? 4 : 2;
-    size_t want = sizeof(in) - (sizeof(in) % frameBytes);
-    size_t n = ringRead(reinterpret_cast<uint8_t*>(in), want);
-    n -= (n % frameBytes);
-
+    size_t want = I2S_WRITE_BYTES / 2;
+    size_t n = ringRead(in, want);
     if (n==0){
       stats.underruns++;
+      // Keep the session in Streaming. The network ring can briefly reach
+      // zero while the I2S DMA still contains queued audio. New PCM will
+      // resume playback as soon as it arrives.
       vTaskDelay(pdMS_TO_TICKS(4));
       continue;
     }
 
-    const size_t sampleCount = n / sizeof(int16_t);
-    for (size_t i=0; i<sampleCount; ++i) {
-      uint16_t a = (uint16_t)(in[i] < 0 ? -in[i] : in[i]);
-      if (a > peak) peak = a;
-    }
-
-    const int16_t *writeBuf = in;
+    const uint8_t *writeBuf = in;
     size_t writeLen = n;
-
     if (streamFormat.channels==1) {
-      int16_t *dst = out;
-      for (size_t i=0; i<sampleCount; ++i) {
-        dst[i*2] = in[i];
-        dst[i*2+1] = in[i];
-      }
+      size_t samples = n / 2;
+      int16_t *src = reinterpret_cast<int16_t*>(in);
+      int16_t *dst = reinterpret_cast<int16_t*>(out);
+      for (size_t i=0;i<samples;i++) { dst[i*2]=src[i]; dst[i*2+1]=src[i]; }
       writeBuf = out;
-      writeLen = sampleCount * 4;
+      writeLen = samples * 4;
     }
 
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
     bool ready = i2sReady;
     size_t w=0;
-    esp_err_t r = ready ? i2s_write(I2S_NUM_0, writeBuf, writeLen, &w, pdMS_TO_TICKS(80)) : ESP_FAIL;
+    esp_err_t r = ready ? i2s_write(I2S_NUM_0,writeBuf,writeLen,&w,pdMS_TO_TICKS(80)) : ESP_FAIL;
     if (i2sMux) xSemaphoreGive(i2sMux);
 
-    if (r==ESP_OK && w>0) {
-      stats.bytesPlayed += (streamFormat.channels==1) ? (w/2) : w;
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(2));
-    }
-
-    uint32_t now = millis();
-    if (now - lastAudioDiagMs >= 1000) {
-      lastAudioDiagMs = now;
-      Serial.printf("[AUDIO] RX=%lu PLAY=%lu BUF=%u%% PEAK=%u UND=%lu\\n",
-                    (unsigned long)stats.bytesReceived,
-                    (unsigned long)stats.bytesPlayed,
-                    (unsigned)ringPercent(),
-                    (unsigned)peak,
-                    (unsigned long)stats.underruns);
-      peak = 0;
-    }
+    if (r==ESP_OK && w>0) stats.bytesPlayed += (streamFormat.channels==1) ? (w/2) : w;
+    else vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
 
