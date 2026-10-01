@@ -16,6 +16,7 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <driver/i2s.h>
+#include <math.h>
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
@@ -44,7 +45,7 @@ static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 16;
 static constexpr size_t AUDIO_RING_BYTES = 65536;
 static constexpr size_t NETWORK_READ_BYTES = 1460;
 static constexpr size_t I2S_WRITE_BYTES = 2048;
-static constexpr uint32_t PREBUFFER_BYTES = 22050;
+static constexpr uint32_t PREBUFFER_BYTES = 12000;
 static constexpr uint32_t STREAM_RETRY_MS = 2500;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
 static constexpr uint32_t OLED_REFRESH_MS = 650;
@@ -118,7 +119,6 @@ static void loadSettings() {
   settings.streamEnabled = preferences.getBool("enabled", true);
   settings.targetBufferMs = preferences.getUShort("buffer", 250);
   if (settings.phoneHost.length() == 0) settings.phoneHost = PHONE_HOST;
-  // Migrate the previous built-in default without overwriting a user-configured host.
   if (settings.phoneHost == "192.168.1.100") {
     settings.phoneHost = PHONE_HOST;
     preferences.putString("host", settings.phoneHost);
@@ -349,8 +349,9 @@ static uint32_t targetPrebufferBytes() {
   if (bytesPerSecond == 0) bytesPerSecond =
       (uint64_t)DEFAULT_SAMPLE_RATE * DEFAULT_CHANNELS * (DEFAULT_BITS_PER_SAMPLE / 8);
   uint64_t bytes = (bytesPerSecond * settings.targetBufferMs) / 1000ULL;
+  // Keep prebuffer responsive (between 4KB and 16KB)
   if (bytes < 4096) bytes = 4096;
-  if (bytes > AUDIO_RING_BYTES - 4096) bytes = AUDIO_RING_BYTES - 4096;
+  if (bytes > 16384) bytes = 16384;
   return (uint32_t)bytes;
 }
 
@@ -362,7 +363,11 @@ static void stopStreamClient() {
 
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   if (bits!=16 || (ch!=1 && ch!=2)) return false;
-  endI2S();
+  
+  if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
+  if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
+
+  // Fixed I2S configuration for ESP32-C3 & UDA1334A DAC
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
     .sample_rate = sr,
@@ -370,14 +375,35 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8, .dma_buf_len = 256,
-    .use_apll = false, .tx_desc_auto_clear = true, .fixed_mclk = I2S_PIN_NO_CHANGE
+    .dma_buf_count = 8,
+    .dma_buf_len = 512,
+    .use_apll = false,          // ESP32-C3 does NOT support APLL!
+    .tx_desc_auto_clear = true,  // Automatically clears DMA buffer on underrun
+    .fixed_mclk = 0             // Must be 0! (Do NOT set to I2S_PIN_NO_CHANGE)
   };
-  if (i2s_driver_install(I2S_NUM_0,&cfg,0,nullptr)!=ESP_OK) return false;
-  i2s_pin_config_t pin = { I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN, I2S_PIN_NO_CHANGE, I2S_PIN_NO_CHANGE };
-  if (i2s_set_pin(I2S_NUM_0,&pin)!=ESP_OK) { endI2S(); return false; }
-  if (i2s_set_clk(I2S_NUM_0,sr,I2S_BITS_PER_SAMPLE_16BIT,I2S_CHANNEL_STEREO)!=ESP_OK) { endI2S(); return false; }
-  i2sReady=true;
+  
+  if (i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr) != ESP_OK) {
+    if (i2sMux) xSemaphoreGive(i2sMux);
+    return false;
+  }
+
+  i2s_pin_config_t pin = {
+    .bck_io_num = I2S_BCLK_PIN,
+    .ws_io_num = I2S_LRCLK_PIN,
+    .data_out_num = I2S_DOUT_PIN,
+    .data_in_num = I2S_PIN_NO_CHANGE
+  };
+
+  if (i2s_set_pin(I2S_NUM_0, &pin) != ESP_OK) {
+    i2s_driver_uninstall(I2S_NUM_0);
+    if (i2sMux) xSemaphoreGive(i2sMux);
+    return false;
+  }
+
+  i2s_zero_dma_buffer(I2S_NUM_0);
+  i2sReady = true;
+  if (i2sMux) xSemaphoreGive(i2sMux);
+
   Serial.printf("[I2S] %lu Hz, %u-bit, %s, BCLK=%d WS=%d DOUT=%d\n", (unsigned long)sr, bits, ch==2?"Stereo":"Mono", I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   return true;
 }
@@ -409,7 +435,7 @@ static bool parseHttpHeaders() {
   stats.lastHttpStatus=200;
   while (!stopRequested) {
     if (!readLine(streamClient,line,HTTP_HEADER_TIMEOUT_MS)) { stats.lastError="HTTP header timeout"; return false; }
-    if (line==String("\r")+"\n") return true;
+    if (line==String("\r")+"\n" || line.length()==0) return true;
     line.trim(); if (line.length()>0) Serial.printf("[HTTP] %s\n",line.c_str());
   }
   return false;
@@ -428,7 +454,6 @@ static bool parseWavHeader(StreamFormat &f) {
     if (!readExact(streamClient,hd,sizeof(hd),HTTP_HEADER_TIMEOUT_MS)) { stats.lastError="WAV chunk timeout"; return false; }
     sc+=sizeof(hd);
     uint32_t sz=readLe32(hd+4);
-    char nm[5]={ (char)hd[0],(char)hd[1],(char)hd[2],(char)hd[3],0 };
     if (memcmp(hd,"fmt ",4)==0) {
       if (sz<16||sz>64){ stats.lastError="Bad WAV fmt"; return false; }
       uint8_t buf[64];
@@ -455,7 +480,8 @@ static bool connectRawTcp() {
   streamFormat.sampleRate=DEFAULT_SAMPLE_RATE; streamFormat.channels=DEFAULT_CHANNELS; streamFormat.bitsPerSample=DEFAULT_BITS_PER_SAMPLE; streamFormat.audioFormat=1; streamFormat.valid=true;
   Serial.printf("[TCP] Connecting to %s:%u\n",settings.phoneHost.c_str(),settings.tcpPort);
   if (!connectStreamHost(settings.tcpPort)){ stats.lastError="TCP host unavailable"; return false; }
-  streamClient.setNoDelay(true); streamClient.setTimeout(1);
+  streamClient.setNoDelay(true);
+  streamClient.setTimeout(3); // 3 seconds timeout
   if (!beginI2S(streamFormat.sampleRate,streamFormat.channels,streamFormat.bitsPerSample)){ stats.lastError="I2S setup failed"; streamClient.stop(); return false; }
   return true;
 }
@@ -464,8 +490,10 @@ static bool connectHttpWav() {
   setReceiverState(RX_CONNECTING); stats.lastHttpStatus=0;
   Serial.printf("[HTTP] Connecting to http://%s:%u/\n",settings.phoneHost.c_str(),settings.httpPort);
   if (!connectStreamHost(settings.httpPort)){ stats.lastError="HTTP host unavailable"; return false; }
-  streamClient.setNoDelay(true); streamClient.setTimeout(1);
-  streamClient.printf("GET /stream HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: C3MusicReceiver/%s\r\nAccept: audio/wav,audio/x-wav,*/*\r\nConnection: keep-alive\r\n\r\n", settings.phoneHost.c_str(), settings.httpPort, FIRMWARE_VERSION);
+  streamClient.setNoDelay(true);
+  streamClient.setTimeout(3); // 3 seconds timeout
+  // Fixed: Connect to "/" which is standard for pkarthikmohan/wifi-audio-streamer on port 8080
+  streamClient.printf("GET / HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: C3MusicReceiver/%s\r\nAccept: audio/wav,audio/x-wav,*/*\r\nConnection: close\r\n\r\n", settings.phoneHost.c_str(), settings.httpPort, FIRMWARE_VERSION);
   if (!parseHttpHeaders()){ streamClient.stop(); return false; }
   StreamFormat pf;
   if (!parseWavHeader(pf)){ streamClient.stop(); return false; }
@@ -484,8 +512,6 @@ static void playbackTask(void*) {
     size_t n = ringRead(in, want);
     if (n==0){
       stats.underruns++;
-      // Wait for the network task to signal newly received PCM instead of
-      // spinning while the ring is empty.
       if (audioDataSemaphore) xSemaphoreTake(audioDataSemaphore, pdMS_TO_TICKS(20));
       else vTaskDelay(pdMS_TO_TICKS(4));
       continue;
@@ -493,6 +519,7 @@ static void playbackTask(void*) {
 
     const uint8_t *writeBuf = in;
     size_t writeLen = n;
+    // If incoming stream is mono (1 channel), duplicate into Left and Right stereo
     if (streamFormat.channels==1) {
       size_t samples = n / 2;
       int16_t *src = reinterpret_cast<int16_t*>(in);
@@ -505,7 +532,7 @@ static void playbackTask(void*) {
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
     bool ready = i2sReady;
     size_t w=0;
-    esp_err_t r = ready ? i2s_write(I2S_NUM_0,writeBuf,writeLen,&w,pdMS_TO_TICKS(80)) : ESP_FAIL;
+    esp_err_t r = ready ? i2s_write(I2S_NUM_0,writeBuf,writeLen,&w,pdMS_TO_TICKS(40)) : ESP_FAIL;
     if (i2sMux) xSemaphoreGive(i2sMux);
 
     if (r==ESP_OK && w>0) stats.bytesPlayed += (streamFormat.channels==1) ? (w/2) : w;
@@ -518,15 +545,24 @@ static void runConnectedStream() {
   stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
     int av=streamClient.available();
-    if (av>0){ size_t w=min((size_t)av,sizeof(in)); int n=streamClient.read(in,w); if (n>0){ stats.bytesReceived+=n; stats.lastReceiveMs=millis(); if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(3)); if (!bufferStarted && ringSize()>=targetPrebufferBytes()){ bufferStarted=true; setReceiverState(RX_STREAMING); } } }
+    if (av>0){
+      size_t w=min((size_t)av,sizeof(in));
+      int n=streamClient.read(in,w);
+      if (n>0){
+        stats.bytesReceived+=n;
+        stats.lastReceiveMs=millis();
+        if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(2));
+        if (!bufferStarted && ringSize()>=targetPrebufferBytes()){
+          bufferStarted=true;
+          setReceiverState(RX_STREAMING);
+        }
+      }
+    }
     else {
       if (!streamClient.connected()) {
         stats.lastError="Stream disconnected";
         break;
       }
-      // Once playback has started, brief periods with no immediately
-      // available TCP bytes are normal and must not switch the receiver
-      // back to "Waiting for audio" while PCM playback continues.
       if (!bufferStarted && millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS) {
         stats.lastError="Stream idle";
         setReceiverState(RX_BUFFERING,"Waiting for audio");
@@ -725,8 +761,6 @@ void loop(){
   if (millis()-lastStatusRefreshMs>=STATUS_REFRESH_MS){
     lastStatusRefreshMs=millis();
     uint32_t target=targetPrebufferBytes();
-    // Do not use low ring occupancy alone to declare the stream "buffering".
-    // A healthy real-time stream can legitimately keep the ring near empty.
     if (receiverState==RX_BUFFERING&&bufferStarted&&ringSize()>=(target/2)) setReceiverState(RX_STREAMING);
   }
   delay(2);
