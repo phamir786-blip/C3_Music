@@ -16,7 +16,6 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <driver/i2s.h>
-#include <driver/i2s_std.h>
 #include <math.h>
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
@@ -109,42 +108,38 @@ static uint32_t lastWifiAttemptMs = 0, lastStreamAttemptMs = 0, lastOledRefreshM
 static bool mdnsStarted = false;
 static constexpr bool I2S_TONE_TEST = true;
 static TaskHandle_t toneTaskHandle = nullptr;
-static i2s_chan_handle_t toneTxHandle = nullptr;
 
 static bool beginI2SToneTest() {
-  i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
-  chanCfg.auto_clear = true;
-  if (i2s_new_channel(&chanCfg, &toneTxHandle, nullptr) != ESP_OK) return false;
+  i2s_config_t cfg = {};
+  cfg.mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX);
+  cfg.sample_rate = DEFAULT_SAMPLE_RATE;
+  cfg.bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT;
+  cfg.channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT;
+  cfg.communication_format = I2S_COMM_FORMAT_STAND_I2S;
+  cfg.intr_alloc_flags = ESP_INTR_FLAG_LEVEL1;
+  cfg.dma_buf_count = 8;
+  cfg.dma_buf_len = 256;
+  cfg.use_apll = false;
+  cfg.tx_desc_auto_clear = true;
+  cfg.fixed_mclk = 0;
 
-  i2s_std_config_t stdCfg = {
-    .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(DEFAULT_SAMPLE_RATE),
-    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
-    .gpio_cfg = {
-      .mclk = I2S_GPIO_UNUSED,
-      .bclk = (gpio_num_t)I2S_BCLK_PIN,
-      .ws = (gpio_num_t)I2S_LRCLK_PIN,
-      .dout = (gpio_num_t)I2S_DOUT_PIN,
-      .din = I2S_GPIO_UNUSED,
-      .invert_flags = {
-        .mclk_inv = false,
-        .bclk_inv = false,
-        .ws_inv = false
-      }
-    }
-  };
+  if (i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr) != ESP_OK) return false;
 
-  if (i2s_channel_init_std_mode(toneTxHandle, &stdCfg) != ESP_OK) {
-    i2s_del_channel(toneTxHandle);
-    toneTxHandle = nullptr;
-    return false;
-  }
-  if (i2s_channel_enable(toneTxHandle) != ESP_OK) {
-    i2s_del_channel(toneTxHandle);
-    toneTxHandle = nullptr;
+  i2s_pin_config_t pins = {};
+  pins.bck_io_num = (gpio_num_t)I2S_BCLK_PIN;
+  pins.ws_io_num = (gpio_num_t)I2S_LRCLK_PIN;
+  pins.data_out_num = (gpio_num_t)I2S_DOUT_PIN;
+  pins.data_in_num = I2S_PIN_NO_CHANGE;
+
+  if (i2s_set_pin(I2S_NUM_0, &pins) != ESP_OK) {
+    i2s_driver_uninstall(I2S_NUM_0);
     return false;
   }
 
-  Serial.printf("[I2S-TEST] Standard Philips I2S %lu Hz, 16-bit Stereo, BCLK=%d WS=%d DOUT=%d\n",
+  i2s_zero_dma_buffer(I2S_NUM_0);
+  i2s_set_clk(I2S_NUM_0, DEFAULT_SAMPLE_RATE, I2S_BITS_PER_SAMPLE_16BIT, I2S_CHANNEL_STEREO);
+
+  Serial.printf("[I2S-TEST] Philips I2S %lu Hz, 16-bit Stereo, BCLK=%d WS=%d DOUT=%d\\n",
                 (unsigned long)DEFAULT_SAMPLE_RATE, I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   return true;
 }
@@ -166,11 +161,8 @@ static void i2sToneTask(void*) {
     }
 
     size_t written = 0;
-    esp_err_t err = toneTxHandle
-      ? i2s_channel_write(toneTxHandle, samples, sizeof(samples), &written, portMAX_DELAY)
-      : ESP_FAIL;
-
-    if (err != ESP_OK) vTaskDelay(pdMS_TO_TICKS(10));
+    esp_err_t err = i2s_write(I2S_NUM_0, samples, sizeof(samples), &written, portMAX_DELAY);
+    if (err != ESP_OK || written == 0) vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
 static void loadSettings() {
