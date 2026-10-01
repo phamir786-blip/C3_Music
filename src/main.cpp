@@ -283,25 +283,32 @@ static bool connectStreamHost(uint16_t port) {
   host.trim();
   if (host.length()==0) return false;
 
+  if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
+  streamClient.stop();
+
   IPAddress ip;
   bool resolved = false;
 
-  if (host.endsWith(".local")) {
+  if (ip.fromString(host)) {
+    resolved = true;
+  } else if (host.endsWith(".local")) {
     ip = MDNS.queryHost(host, 2000);
     resolved = (ip != IPAddress(0,0,0,0));
-  }
-
-  if (!resolved) {
+  } else {
     resolved = WiFi.hostByName(host.c_str(), ip);
   }
 
+  bool connected = false;
   if (resolved) {
-    Serial.printf("[STREAM] Resolved %s -> %s:%u\n", host.c_str(), ip.toString().c_str(), port);
-    return streamClient.connect(ip, port);
+    Serial.printf("[STREAM] Connecting to %s:%u\n", ip.toString().c_str(), port);
+    connected = streamClient.connect(ip, port);
+  } else {
+    Serial.printf("[STREAM] Connecting to host %s:%u\n", host.c_str(), port);
+    connected = streamClient.connect(host.c_str(), port);
   }
 
-  Serial.printf("[STREAM] Direct connect to %s:%u\n", host.c_str(), port);
-  return streamClient.connect(host.c_str(), port);
+  if (streamClientMux) xSemaphoreGive(streamClientMux);
+  return connected;
 }
 
 static void connectWifiIfNeeded() {
