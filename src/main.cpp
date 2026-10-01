@@ -111,8 +111,8 @@ static TaskHandle_t toneTaskHandle = nullptr;
 
 static void i2sToneTask(void*) {
   static constexpr int FRAMES = 256;
-  static constexpr float TWO_PI = 6.28318530718f;
-  static constexpr float STEP = TWO_PI * 440.0f / 44100.0f;
+  static constexpr float TONE_TWO_PI = 6.28318530718f;
+  static constexpr float STEP = TONE_TWO_PI * 440.0f / 44100.0f;
   int16_t samples[FRAMES * 2];
   float phase = 0.0f;
   for (;;) {
@@ -121,7 +121,7 @@ static void i2sToneTask(void*) {
       samples[i * 2] = s;
       samples[i * 2 + 1] = s;
       phase += STEP;
-      if (phase >= TWO_PI) phase -= TWO_PI;
+      if (phase >= TONE_TWO_PI) phase -= TWO_PI;
     }
     size_t written = 0;
     if (i2sReady) {
