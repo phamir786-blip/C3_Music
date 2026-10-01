@@ -16,6 +16,7 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <driver/i2s.h>
+#include <driver/i2s_std.h>
 #include <math.h>
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
@@ -108,34 +109,70 @@ static uint32_t lastWifiAttemptMs = 0, lastStreamAttemptMs = 0, lastOledRefreshM
 static bool mdnsStarted = false;
 static constexpr bool I2S_TONE_TEST = true;
 static TaskHandle_t toneTaskHandle = nullptr;
+static i2s_chan_handle_t toneTxHandle = nullptr;
+
+static bool beginI2SToneTest() {
+  i2s_chan_config_t chanCfg = I2S_CHANNEL_DEFAULT_CONFIG(I2S_NUM_0, I2S_ROLE_MASTER);
+  chanCfg.auto_clear = true;
+  if (i2s_new_channel(&chanCfg, &toneTxHandle, nullptr) != ESP_OK) return false;
+
+  i2s_std_config_t stdCfg = {
+    .clk_cfg = I2S_STD_CLK_DEFAULT_CONFIG(DEFAULT_SAMPLE_RATE),
+    .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(I2S_DATA_BIT_WIDTH_16BIT, I2S_SLOT_MODE_STEREO),
+    .gpio_cfg = {
+      .mclk = I2S_GPIO_UNUSED,
+      .bclk = (gpio_num_t)I2S_BCLK_PIN,
+      .ws = (gpio_num_t)I2S_LRCLK_PIN,
+      .dout = (gpio_num_t)I2S_DOUT_PIN,
+      .din = I2S_GPIO_UNUSED,
+      .invert_flags = {
+        .mclk_inv = false,
+        .bclk_inv = false,
+        .ws_inv = false
+      }
+    }
+  };
+
+  if (i2s_channel_init_std_mode(toneTxHandle, &stdCfg) != ESP_OK) {
+    i2s_del_channel(toneTxHandle);
+    toneTxHandle = nullptr;
+    return false;
+  }
+  if (i2s_channel_enable(toneTxHandle) != ESP_OK) {
+    i2s_del_channel(toneTxHandle);
+    toneTxHandle = nullptr;
+    return false;
+  }
+
+  Serial.printf("[I2S-TEST] Standard Philips I2S %lu Hz, 16-bit Stereo, BCLK=%d WS=%d DOUT=%d\n",
+                (unsigned long)DEFAULT_SAMPLE_RATE, I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  return true;
+}
 
 static void i2sToneTask(void*) {
   static constexpr int FRAMES = 256;
   static constexpr float TONE_TWO_PI = 6.28318530718f;
-  static constexpr float STEP = TONE_TWO_PI * 440.0f / 44100.0f;
+  static constexpr float STEP = TONE_TWO_PI * 440.0f / (float)DEFAULT_SAMPLE_RATE;
   int16_t samples[FRAMES * 2];
   float phase = 0.0f;
+
   for (;;) {
     for (int i = 0; i < FRAMES; ++i) {
-      int16_t s = (int16_t)(12000.0f * sinf(phase));
+      int16_t s = (int16_t)(16000.0f * sinf(phase));
       samples[i * 2] = s;
       samples[i * 2 + 1] = s;
       phase += STEP;
-      if (phase >= TONE_TWO_PI) phase -= TWO_PI;
+      if (phase >= TONE_TWO_PI) phase -= TONE_TWO_PI;
     }
+
     size_t written = 0;
-    if (i2sReady) {
-      if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
-      bool ready = i2sReady;
-      esp_err_t err = ready ? i2s_write(I2S_NUM_0, samples, sizeof(samples), &written, portMAX_DELAY) : ESP_FAIL;
-      if (i2sMux) xSemaphoreGive(i2sMux);
-      if (err != ESP_OK) vTaskDelay(pdMS_TO_TICKS(10));
-    } else {
-      vTaskDelay(pdMS_TO_TICKS(10));
-    }
+    esp_err_t err = toneTxHandle
+      ? i2s_channel_write(toneTxHandle, samples, sizeof(samples), &written, portMAX_DELAY)
+      : ESP_FAIL;
+
+    if (err != ESP_OK) vTaskDelay(pdMS_TO_TICKS(10));
   }
 }
-
 static void loadSettings() {
   preferences.begin("c3music", false);
   settings.phoneHost = preferences.getString("host", PHONE_HOST);
@@ -735,11 +772,12 @@ void setup(){
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setAutoReconnect(true);
   setupWebServer();
   if (I2S_TONE_TEST) {
-    if (!beginI2S(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS, DEFAULT_BITS_PER_SAMPLE)) {
-      setReceiverState(RX_ERROR,"I2S tone setup failed");
+    if (!beginI2SToneTest()) {
+      setReceiverState(RX_ERROR,"I2S standard tone setup failed");
     } else {
+      i2sReady=true;
       setReceiverState(RX_STREAMING);
-      BaseType_t ok=xTaskCreate(i2sToneTask,"i2sTone",3072,nullptr,3,&toneTaskHandle);
+      BaseType_t ok=xTaskCreate(i2sToneTask,"i2sTone",4096,nullptr,4,&toneTaskHandle);
       if (ok!=pdPASS) setReceiverState(RX_ERROR,"Tone task creation failed");
     }
   } else {
