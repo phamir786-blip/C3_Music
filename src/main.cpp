@@ -32,8 +32,8 @@ static constexpr uint8_t OLED_SCL = 6;
 static constexpr uint8_t OLED_WIDTH = 72;
 static constexpr uint8_t OLED_HEIGHT = 40;
 
-static constexpr int I2S_BCLK_PIN = 4;
-static constexpr int I2S_LRCLK_PIN = 7;
+static constexpr int I2S_BCLK_PIN = 3;
+static constexpr int I2S_LRCLK_PIN = 1;
 static constexpr int I2S_DOUT_PIN = 10;
 
 static constexpr uint16_t TCP_DEFAULT_PORT = 50005;
