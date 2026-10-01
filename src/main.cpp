@@ -484,8 +484,9 @@ static void playbackTask(void*) {
     size_t n = ringRead(in, want);
     if (n==0){
       stats.underruns++;
-      bufferStarted=false;
-      if (receiverState==RX_STREAMING) setReceiverState(RX_BUFFERING,"Buffer low");
+      // Keep the session in Streaming. The network ring can briefly reach
+      // zero while the I2S DMA still contains queued audio. New PCM will
+      // resume playback as soon as it arrives.
       vTaskDelay(pdMS_TO_TICKS(4));
       continue;
     }
