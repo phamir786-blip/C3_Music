@@ -51,7 +51,7 @@ static constexpr uint32_t OLED_REFRESH_MS = 650;
 static constexpr uint32_t STATUS_REFRESH_MS = 1000;
 
 static constexpr uint32_t HTTP_HEADER_TIMEOUT_MS = 8000;
-static constexpr uint32_t STREAM_READ_TIMEOUT_MS = 3500;
+static constexpr uint32_t STREAM_READ_TIMEOUT_MS = 15000;
 static constexpr uint32_t WAV_PARSE_MAX_BYTES = 4096;
 
 enum StreamMode : uint8_t { STREAM_MODE_TCP = 0, STREAM_MODE_HTTP = 1 };
@@ -518,7 +518,18 @@ static void runConnectedStream() {
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
     int av=streamClient.available();
     if (av>0){ size_t w=min((size_t)av,sizeof(in)); int n=streamClient.read(in,w); if (n>0){ stats.bytesReceived+=n; stats.lastReceiveMs=millis(); if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(3)); if (!bufferStarted && ringSize()>=targetPrebufferBytes()){ bufferStarted=true; setReceiverState(RX_STREAMING); } } }
-    else { if (millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS){ stats.lastError="Stream timeout"; break; } vTaskDelay(pdMS_TO_TICKS(1)); }
+    else {
+      if (!streamClient.connected()) {
+        stats.lastError="Stream disconnected";
+        break;
+      }
+      if (millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS) {
+        stats.lastError="Stream idle";
+        setReceiverState(RX_BUFFERING,"Waiting for audio");
+        stats.lastReceiveMs=millis();
+      }
+      vTaskDelay(pdMS_TO_TICKS(1));
+    }
   }
 }
 
