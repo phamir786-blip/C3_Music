@@ -17,8 +17,8 @@
 #include <Wire.h>
 #include <driver/i2s.h>
 
-static const char WIFI_SSID[] = "YOUR_WIFI_NAME";
-static const char WIFI_PASSWORD[] = "YOUR_WIFI_PASSWORD";
+static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
+static const char WIFI_PASSWORD[] = "006BF4FD";
 static const char PHONE_HOST[] = "192.168.1.100";
 
 static const char DEVICE_NAME[] = "C3 Music Receiver";
