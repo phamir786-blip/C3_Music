@@ -682,7 +682,14 @@ void setup(){
 
 void loop(){
   server.handleClient();
-  if (WiFi.status()!=WL_CONNECTED){ mdnsStarted=false; if (receiverState!=RX_WIFI_CONNECTING&&receiverState!=RX_UPDATING&&settings.streamEnabled) setReceiverState(RX_WIFI_OFFLINE); connectWifiIfNeeded(); }
+  if (WiFi.status()!=WL_CONNECTED){
+    mdnsStarted=false;
+    if (receiverState!=RX_WIFI_OFFLINE&&receiverState!=RX_WIFI_CONNECTING&&receiverState!=RX_UPDATING&&settings.streamEnabled){
+      Serial.printf("[WIFI] Disconnected (status=%d)\n",(int)WiFi.status());
+      setReceiverState(RX_WIFI_OFFLINE);
+    }
+    connectWifiIfNeeded();
+  }
   else beginMdnsIfNeeded();
   displayUpdate();
   if (millis()-lastStatusRefreshMs>=STATUS_REFRESH_MS){
