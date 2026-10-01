@@ -1,9 +1,3 @@
-static void setStatsError(const char *message) {
-  if (!message) message = "";
-  strncpy(stats.lastError, message, sizeof(stats.lastError) - 1);
-  stats.lastError[sizeof(stats.lastError) - 1] = '\0';
-}
-
 /*
   C3 Music Receiver
   ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
@@ -78,7 +72,7 @@ struct RuntimeStats {
   uint32_t reconnects = 0, underruns = 0, streamErrors = 0;
   uint32_t bytesReceived = 0, bytesPlayed = 0, sessionStartedMs = 0, lastReceiveMs = 0;
   int lastHttpStatus = 0;
-  char lastError[96] = {0};
+  String lastError;
 };
 
 struct Settings {
@@ -174,7 +168,7 @@ static const char* streamModeName(StreamMode m) { return m == STREAM_MODE_HTTP ?
 
 static void setReceiverState(ReceiverState value, const String &error = "") {
   receiverState = value;
-  if (error.length() > 0) { setStatsError(error.c_str()); Serial.printf("[STATE] %s: %s\n", receiverStateName(value), error.c_str()); }
+  if (error.length() > 0) { stats.lastError = error; Serial.printf("[STATE] %s: %s\n", receiverStateName(value), error.c_str()); }
   else { Serial.printf("[STATE] %s\n", receiverStateName(value)); }
 }
 
@@ -277,7 +271,7 @@ static void displayUpdate() {
     else if (receiverState==RX_WIFI_CONNECTING) msg = "Connecting...";
     else msg = "Check WiFi";
     displayLineCenter(msg.c_str(), 22, u8g2_font_6x10_tf);
-    if (receiverState==RX_ERROR && strlen(stats.lastError)>0) {
+    if (receiverState==RX_ERROR && stats.lastError.length()>0) {
       String e = stats.lastError; if (e.length()>17) e=e.substring(0,17);
       displayLineCenter(e.c_str(), 38, u8g2_font_4x6_tf);
     } else {
@@ -568,13 +562,13 @@ static void streamTask(void*) {
       if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     }
     if (ok){ stats.reconnects++; runConnectedStream(); }
-    else { stats.streamErrors++; setReceiverState(RX_ERROR,strlen(stats.lastError)?stats.lastError:"Stream unavailable"); }
+    else { stats.streamErrors++; setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable"); }
     streamClient.stop(); endI2S(); ringClear();
     if (!stopRequested && settings.streamEnabled && settings.autoReconnect) {
       vTaskDelay(pdMS_TO_TICKS(STREAM_RETRY_MS));
     } else {
       if (!stopRequested && settings.streamEnabled && !settings.autoReconnect) {
-        setReceiverState(RX_ERROR, strlen(stats.lastError) ? stats.lastError : "Auto reconnect disabled");
+        setReceiverState(RX_ERROR, stats.lastError.length() ? stats.lastError : "Auto reconnect disabled");
       }
       vTaskDelay(pdMS_TO_TICKS(250));
     }
@@ -630,7 +624,7 @@ static String makeStatusJson(){
   r+="\"heap\":"+String(ESP.getFreeHeap())+",";
   r+="\"flashSize\":"+String(ESP.getFlashChipSize())+",";
   r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
-  r+="\"lastError\":\""+jsonEscape(String(stats.lastError))+"\"";
+  r+="\"lastError\":\""+jsonEscape(stats.lastError)+"\"";
   r+="}";
   return r;
 }
