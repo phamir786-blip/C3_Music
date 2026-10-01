@@ -519,7 +519,17 @@ static void runConnectedStream() {
 
 static void streamTask(void*) {
   for(;;){
-    if (WiFi.status()!=WL_CONNECTED){ stopStreamClient(); endI2S(); ringClear(); if (settings.streamEnabled && !stopRequested) setReceiverState(RX_WIFI_OFFLINE,"WiFi disconnected"); vTaskDelay(pdMS_TO_TICKS(500)); continue; }
+    if (WiFi.status()!=WL_CONNECTED){
+      stopStreamClient();
+      endI2S();
+      ringClear();
+      if (settings.streamEnabled && !stopRequested && receiverState!=RX_WIFI_OFFLINE && receiverState!=RX_WIFI_CONNECTING && receiverState!=RX_UPDATING){
+        Serial.printf("[WIFI] Stream task sees disconnected (status=%d)\n",(int)WiFi.status());
+        setReceiverState(RX_WIFI_OFFLINE,"WiFi disconnected");
+      }
+      vTaskDelay(pdMS_TO_TICKS(500));
+      continue;
+    }
     if (!settings.streamEnabled||stopRequested){ streamClient.stop(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
     if (millis()-lastStreamAttemptMs<STREAM_RETRY_MS){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
     lastStreamAttemptMs=millis();
