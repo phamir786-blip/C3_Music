@@ -19,7 +19,7 @@
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
-static const char PHONE_HOST[] = "192.168.1.100";
+static const char PHONE_HOST[] = "192.168.254.119";
 
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3music";
@@ -118,6 +118,11 @@ static void loadSettings() {
   settings.streamEnabled = preferences.getBool("enabled", true);
   settings.targetBufferMs = preferences.getUShort("buffer", 250);
   if (settings.phoneHost.length() == 0) settings.phoneHost = PHONE_HOST;
+  // Migrate the previous built-in default without overwriting a user-configured host.
+  if (settings.phoneHost == "192.168.1.100") {
+    settings.phoneHost = PHONE_HOST;
+    preferences.putString("host", settings.phoneHost);
+  }
   if (settings.tcpPort == 0) settings.tcpPort = TCP_DEFAULT_PORT;
   if (settings.httpPort == 0) settings.httpPort = HTTP_DEFAULT_PORT;
   if (settings.targetBufferMs < 80) settings.targetBufferMs = 80;
