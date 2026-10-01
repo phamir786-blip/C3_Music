@@ -453,7 +453,7 @@ static bool connectHttpWav() {
   Serial.printf("[HTTP] Connecting to http://%s:%u/\n",settings.phoneHost.c_str(),settings.httpPort);
   if (!connectStreamHost(settings.httpPort)){ stats.lastError="HTTP host unavailable"; return false; }
   streamClient.setNoDelay(true); streamClient.setTimeout(1);
-  streamClient.printf("GET / HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: C3MusicReceiver/%s\r\nAccept: audio/wav,audio/x-wav,*/*\r\nConnection: keep-alive\r\n\r\n", settings.phoneHost.c_str(), settings.httpPort, FIRMWARE_VERSION);
+  streamClient.printf("GET /stream HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: C3MusicReceiver/%s\r\nAccept: audio/wav,audio/x-wav,*/*\r\nConnection: keep-alive\r\n\r\n", settings.phoneHost.c_str(), settings.httpPort, FIRMWARE_VERSION);
   if (!parseHttpHeaders()){ streamClient.stop(); return false; }
   StreamFormat pf;
   if (!parseWavHeader(pf)){ streamClient.stop(); return false; }
