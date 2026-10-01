@@ -523,7 +523,10 @@ static void runConnectedStream() {
         stats.lastError="Stream disconnected";
         break;
       }
-      if (millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS) {
+      // Once playback has started, brief periods with no immediately
+      // available TCP bytes are normal and must not switch the receiver
+      // back to "Waiting for audio" while PCM playback continues.
+      if (!bufferStarted && millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS) {
         stats.lastError="Stream idle";
         setReceiverState(RX_BUFFERING,"Waiting for audio");
         stats.lastReceiveMs=millis();
@@ -721,8 +724,9 @@ void loop(){
   if (millis()-lastStatusRefreshMs>=STATUS_REFRESH_MS){
     lastStatusRefreshMs=millis();
     uint32_t target=targetPrebufferBytes();
-    if (receiverState==RX_STREAMING&&ringSize()<(target/8)) setReceiverState(RX_BUFFERING,"Buffer low");
-    else if (receiverState==RX_BUFFERING&&bufferStarted&&ringSize()>=(target/2)) setReceiverState(RX_STREAMING);
+    // Do not use low ring occupancy alone to declare the stream "buffering".
+    // A healthy real-time stream can legitimately keep the ring near empty.
+    if (receiverState==RX_BUFFERING&&bufferStarted&&ringSize()>=(target/2)) setReceiverState(RX_STREAMING);
   }
   delay(2);
 }
