@@ -287,11 +287,8 @@ static bool connectStreamHost(uint16_t port) {
   bool resolved = false;
 
   if (host.endsWith(".local")) {
-    int mdnsResult = MDNS.queryHost(host, 2000);
-    if (mdnsResult >= 0) {
-      ip = MDNS.IP(mdnsResult);
-      resolved = (ip != IPAddress(0,0,0,0));
-    }
+    ip = MDNS.queryHost(host, 2000);
+    resolved = (ip != IPAddress(0,0,0,0));
   }
 
   if (!resolved) {
