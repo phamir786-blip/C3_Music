@@ -484,10 +484,10 @@ static void playbackTask(void*) {
     size_t n = ringRead(in, want);
     if (n==0){
       stats.underruns++;
-      // Keep the session in Streaming. The network ring can briefly reach
-      // zero while the I2S DMA still contains queued audio. New PCM will
-      // resume playback as soon as it arrives.
-      vTaskDelay(pdMS_TO_TICKS(4));
+      // Wait for the network task to signal newly received PCM instead of
+      // spinning while the ring is empty.
+      if (audioDataSemaphore) xSemaphoreTake(audioDataSemaphore, pdMS_TO_TICKS(20));
+      else vTaskDelay(pdMS_TO_TICKS(4));
       continue;
     }
 
