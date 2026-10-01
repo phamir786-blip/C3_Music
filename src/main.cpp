@@ -278,6 +278,35 @@ static void displayUpdate() {
 
 static void beginMdnsIfNeeded();
 
+static bool connectStreamHost(uint16_t port) {
+  String host = settings.phoneHost;
+  host.trim();
+  if (host.length()==0) return false;
+
+  IPAddress ip;
+  bool resolved = false;
+
+  if (host.endsWith(".local")) {
+    int mdnsResult = MDNS.queryHost(host, 2000);
+    if (mdnsResult >= 0) {
+      ip = MDNS.IP(mdnsResult);
+      resolved = (ip != IPAddress(0,0,0,0));
+    }
+  }
+
+  if (!resolved) {
+    resolved = WiFi.hostByName(host.c_str(), ip);
+  }
+
+  if (resolved) {
+    Serial.printf("[STREAM] Resolved %s -> %s:%u\n", host.c_str(), ip.toString().c_str(), port);
+    return streamClient.connect(ip, port);
+  }
+
+  Serial.printf("[STREAM] Direct connect to %s:%u\n", host.c_str(), port);
+  return streamClient.connect(host.c_str(), port);
+}
+
 static void connectWifiIfNeeded() {
   if (WiFi.status()==WL_CONNECTED) { beginMdnsIfNeeded(); return; }
   if (millis()-lastWifiAttemptMs < WIFI_RETRY_MS) return;
@@ -416,7 +445,7 @@ static bool connectRawTcp() {
   setReceiverState(RX_CONNECTING);
   streamFormat.sampleRate=DEFAULT_SAMPLE_RATE; streamFormat.channels=DEFAULT_CHANNELS; streamFormat.bitsPerSample=DEFAULT_BITS_PER_SAMPLE; streamFormat.audioFormat=1; streamFormat.valid=true;
   Serial.printf("[TCP] Connecting to %s:%u\n",settings.phoneHost.c_str(),settings.tcpPort);
-  if (!streamClient.connect(settings.phoneHost.c_str(),settings.tcpPort)){ stats.lastError="TCP host unavailable"; return false; }
+  if (!connectStreamHost(settings.tcpPort)){ stats.lastError="TCP host unavailable"; return false; }
   streamClient.setNoDelay(true); streamClient.setTimeout(1);
   if (!beginI2S(streamFormat.sampleRate,streamFormat.channels,streamFormat.bitsPerSample)){ stats.lastError="I2S setup failed"; streamClient.stop(); return false; }
   return true;
@@ -425,7 +454,7 @@ static bool connectRawTcp() {
 static bool connectHttpWav() {
   setReceiverState(RX_CONNECTING); stats.lastHttpStatus=0;
   Serial.printf("[HTTP] Connecting to http://%s:%u/\n",settings.phoneHost.c_str(),settings.httpPort);
-  if (!streamClient.connect(settings.phoneHost.c_str(),settings.httpPort)){ stats.lastError="HTTP host unavailable"; return false; }
+  if (!connectStreamHost(settings.httpPort)){ stats.lastError="HTTP host unavailable"; return false; }
   streamClient.setNoDelay(true); streamClient.setTimeout(1);
   streamClient.printf("GET / HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: C3MusicReceiver/%s\r\nAccept: audio/wav,audio/x-wav,*/*\r\nConnection: keep-alive\r\n\r\n", settings.phoneHost.c_str(), settings.httpPort, FIRMWARE_VERSION);
   if (!parseHttpHeaders()){ streamClient.stop(); return false; }
