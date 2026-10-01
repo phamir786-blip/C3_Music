@@ -52,6 +52,7 @@ static constexpr uint32_t STATUS_REFRESH_MS = 1000;
 
 static constexpr uint32_t HTTP_HEADER_TIMEOUT_MS = 8000;
 static constexpr uint32_t STREAM_READ_TIMEOUT_MS = 15000;
+static constexpr uint32_t STREAM_STARTUP_TIMEOUT_MS = 3500;
 static constexpr uint32_t WAV_PARSE_MAX_BYTES = 4096;
 
 enum StreamMode : uint8_t { STREAM_MODE_TCP = 0, STREAM_MODE_HTTP = 1 };
@@ -513,28 +514,46 @@ static void playbackTask(void*) {
   }
 }
 
-static void runConnectedStream() {
+static bool runConnectedStream() {
   uint8_t in[NETWORK_READ_BYTES];
-  stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
+  bool receivedAudio=false;
+  stats.sessionStartedMs=millis();
+  stats.lastReceiveMs=millis();
+  ringClear();
+  setReceiverState(RX_BUFFERING);
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
     int av=streamClient.available();
-    if (av>0){ size_t w=min((size_t)av,sizeof(in)); int n=streamClient.read(in,w); if (n>0){ stats.bytesReceived+=n; stats.lastReceiveMs=millis(); if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(3)); if (!bufferStarted && ringSize()>=targetPrebufferBytes()){ bufferStarted=true; setReceiverState(RX_STREAMING); } } }
-    else {
+    if (av>0){
+      size_t w=min((size_t)av,sizeof(in));
+      int n=streamClient.read(in,w);
+      if (n>0){
+        receivedAudio=true;
+        stats.bytesReceived+=n;
+        stats.lastReceiveMs=millis();
+        if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(3));
+        if (!bufferStarted && ringSize()>=targetPrebufferBytes()){
+          bufferStarted=true;
+          setReceiverState(RX_STREAMING);
+        }
+      }
+    } else {
       if (!streamClient.connected()) {
         stats.lastError="Stream disconnected";
         break;
       }
-      // Once playback has started, brief periods with no immediately
-      // available TCP bytes are normal and must not switch the receiver
-      // back to "Waiting for audio" while PCM playback continues.
-      if (!bufferStarted && millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS) {
-        stats.lastError="Stream idle";
-        setReceiverState(RX_BUFFERING,"Waiting for audio");
-        stats.lastReceiveMs=millis();
+      // Before the first PCM byte arrives, a connected but silent TCP
+      // socket is not a usable stream. End it so streamTask can fall back.
+      if (!receivedAudio && millis()-stats.lastReceiveMs>STREAM_STARTUP_TIMEOUT_MS) {
+        stats.lastError="No audio data";
+        setReceiverState(RX_ERROR,"TCP connected but no audio");
+        break;
       }
+      // After PCM has started, do not tear down a healthy session just
+      // because the ring or TCP receive buffer is temporarily empty.
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
+  return receivedAudio;
 }
 
 static void streamTask(void*) {
@@ -561,8 +580,22 @@ static void streamTask(void*) {
       Serial.printf("[STREAM] Primary failed; trying %s\n",streamModeName(fb));
       if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     }
-    if (ok){ stats.reconnects++; runConnectedStream(); }
-    else { stats.streamErrors++; setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable"); }
+    if (ok){
+      stats.reconnects++;
+      bool receivedAudio=runConnectedStream();
+      if (!receivedAudio && !stopRequested && settings.autoFallback && tr==STREAM_MODE_TCP){
+        stopStreamClient();
+        endI2S();
+        ringClear();
+        Serial.printf("[STREAM] TCP connected but no audio; trying HTTP WAV\n");
+        ok=connectHttpWav();
+        if (ok) runConnectedStream();
+      }
+    }
+    else {
+      stats.streamErrors++;
+      setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable");
+    }
     streamClient.stop(); endI2S(); ringClear();
     if (!stopRequested && settings.streamEnabled && settings.autoReconnect) {
       vTaskDelay(pdMS_TO_TICKS(STREAM_RETRY_MS));
