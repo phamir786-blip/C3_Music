@@ -16,6 +16,7 @@
 #include <U8g2lib.h>
 #include <Wire.h>
 #include <driver/i2s.h>
+#include <math.h>
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
@@ -105,6 +106,35 @@ static SemaphoreHandle_t streamClientMux = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr, playbackTaskHandle = nullptr;
 static uint32_t lastWifiAttemptMs = 0, lastStreamAttemptMs = 0, lastOledRefreshMs = 0, lastStatusRefreshMs = 0;
 static bool mdnsStarted = false;
+static constexpr bool I2S_TONE_TEST = true;
+static TaskHandle_t toneTaskHandle = nullptr;
+
+static void i2sToneTask(void*) {
+  static constexpr int FRAMES = 256;
+  static constexpr float TWO_PI = 6.28318530718f;
+  static constexpr float STEP = TWO_PI * 440.0f / 44100.0f;
+  int16_t samples[FRAMES * 2];
+  float phase = 0.0f;
+  for (;;) {
+    for (int i = 0; i < FRAMES; ++i) {
+      int16_t s = (int16_t)(12000.0f * sinf(phase));
+      samples[i * 2] = s;
+      samples[i * 2 + 1] = s;
+      phase += STEP;
+      if (phase >= TWO_PI) phase -= TWO_PI;
+    }
+    size_t written = 0;
+    if (i2sReady) {
+      if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
+      bool ready = i2sReady;
+      esp_err_t err = ready ? i2s_write(I2S_NUM_0, samples, sizeof(samples), &written, portMAX_DELAY) : ESP_FAIL;
+      if (i2sMux) xSemaphoreGive(i2sMux);
+      if (err != ESP_OK) vTaskDelay(pdMS_TO_TICKS(10));
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(10));
+    }
+  }
+}
 
 static void loadSettings() {
   preferences.begin("c3music", false);
@@ -704,9 +734,19 @@ void setup(){
   displayBegin(); setReceiverState(RX_BOOTING);
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setAutoReconnect(true);
   setupWebServer();
-  BaseType_t ok1=xTaskCreate(playbackTask,"i2sPlayback",4096,nullptr,3,&playbackTaskHandle);
-  BaseType_t ok2=xTaskCreate(streamTask,"pcmStream",6144,nullptr,2,&streamTaskHandle);
-  if (ok1!=pdPASS||ok2!=pdPASS) setReceiverState(RX_ERROR,"Task creation failed");
+  if (I2S_TONE_TEST) {
+    if (!beginI2S(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS, DEFAULT_BITS_PER_SAMPLE)) {
+      setReceiverState(RX_ERROR,"I2S tone setup failed");
+    } else {
+      setReceiverState(RX_STREAMING);
+      BaseType_t ok=xTaskCreate(i2sToneTask,"i2sTone",3072,nullptr,3,&toneTaskHandle);
+      if (ok!=pdPASS) setReceiverState(RX_ERROR,"Tone task creation failed");
+    }
+  } else {
+    BaseType_t ok1=xTaskCreate(playbackTask,"i2sPlayback",4096,nullptr,3,&playbackTaskHandle);
+    BaseType_t ok2=xTaskCreate(streamTask,"pcmStream",6144,nullptr,2,&streamTaskHandle);
+    if (ok1!=pdPASS||ok2!=pdPASS) setReceiverState(RX_ERROR,"Task creation failed");
+  }
   connectWifiIfNeeded(); displayUpdate();
 }
 
