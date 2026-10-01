@@ -3,7 +3,7 @@
   ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
   TCP PCM (50005) primary, HTTP WAV (8080) fallback
   OLED: SDA 5, SCL 6
-  I2S: BCLK 4, LRCLK 7, DOUT 10
+  I2S: BCLK 3, LRCLK 1, DOUT 10
 */
 
 #include <Arduino.h>
@@ -30,8 +30,8 @@ static constexpr uint8_t OLED_SCL = 6;
 static constexpr uint8_t OLED_WIDTH = 72;
 static constexpr uint8_t OLED_HEIGHT = 40;
 
-static constexpr int I2S_BCLK_PIN = 4;
-static constexpr int I2S_LRCLK_PIN = 7;
+static constexpr int I2S_BCLK_PIN = 3;
+static constexpr int I2S_LRCLK_PIN = 1;
 static constexpr int I2S_DOUT_PIN = 10;
 
 static constexpr uint16_t TCP_DEFAULT_PORT = 50005;
