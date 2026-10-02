@@ -67,9 +67,7 @@ String headerValue(const String& req,const char* name){
   if(p<0){ key=String(name)+" :"; p=req.indexOf(key); }
   if(p<0) return "";
   p+=key.length(); while(p<(int)req.length()&&(req[p]==' '||req[p]=='\t'))p++;
-  int e=req.indexOf("\r
-",p); if(e<0)e=req.indexOf('
-',p);
+  int e=req.indexOf("\r\n",p); if(e<0)e=req.indexOf('\n',p);
   if(e<0)e=req.length(); return req.substring(p,e);
 }
 int cseqOf(const String& req){return headerValue(req,"CSeq").toInt();}
@@ -145,9 +143,7 @@ String appleResponse(const String& challenge){
 bool parseFmtp(const String& body){
   int p=body.indexOf("a=fmtp:");
   if(p<0)return false; p=body.indexOf(' ',p); if(p<0)p=body.indexOf('\t',p); if(p<0)return false;
-  int e=body.indexOf("\r
-",p); if(e<0)e=body.indexOf('
-',p); if(e<0)e=body.length();
+  int e=body.indexOf("\r\n",p); if(e<0)e=body.indexOf('\n',p); if(e<0)e=body.length();
   String f=body.substring(p+1,e); f.trim();
   int vals[11]={}; int count=0; char buf[160]; f.toCharArray(buf,sizeof(buf)); char* tok=strtok(buf," ,\t");
   while(tok&&count<11){vals[count++]=atoi(tok);tok=strtok(nullptr," ,\t");}
@@ -167,8 +163,7 @@ bool parseFmtp(const String& body){
   cookie[36]=(uint8_t)(vals[9]>>24); cookie[37]=(uint8_t)(vals[9]>>16); cookie[38]=(uint8_t)(vals[9]>>8); cookie[39]=(uint8_t)vals[9];
   cookie[40]=(uint8_t)(vals[10]>>24); cookie[41]=(uint8_t)(vals[10]>>16); cookie[42]=(uint8_t)(vals[10]>>8); cookie[43]=(uint8_t)vals[10];
   alac_set_info(alac,(char*)cookie);
-  Serial.printf("[AIRPLAY1] ALAC %d Hz, %d-bit, %dch, frame=%d
-",vals[11],vals[2],vals[7],vals[0]);
+  Serial.printf("[AIRPLAY1] ALAC %d Hz, %d-bit, %dch, frame=%d\n",vals[11],vals[2],vals[7],vals[0]);
   return true;
 }
 
@@ -183,17 +178,13 @@ bool decryptAesKey(const String& s){
 }
 
 void sendRtsp(int code,const String& req,const String& extra=""){
-  String r="RTSP/1.0 "+String(code)+" "+(code==200?"OK":"Error")+"\r
-";
-  r+="CSeq: "+String(cseqOf(req))+"\r
-";
-  r+="Server: AirTunes/105.1\r
-";
-  r+="Audio-Jack-Status: connected; type=analog\r
-";
+  String r="RTSP/1.0 "+String(code)+" "+(code==200?"OK":"Error")+"\r\n";
+  r+="CSeq: "+String(cseqOf(req))+"\r\n";
+  r+="Server: AirTunes/105.1\r\n";
+  r+="Audio-Jack-Status: connected; type=analog\r\n";
+  r+="Content-Length: 0\r\n";
   if(extra.length())r+=extra;
-  r+="\r
-"; rtspClient.print(r);
+  r+="\r\n"; rtspClient.print(r);
 }
 
 void handleRtsp(String req,String body){
@@ -201,12 +192,10 @@ void handleRtsp(String req,String body){
   String extra;
   String challenge=headerValue(req,"Apple-Challenge");
   if(challenge.length()){
-    String ar=appleResponse(challenge); if(ar.length())extra+="Apple-Response: "+ar+"\r
-";
+    String ar=appleResponse(challenge); if(ar.length())extra+="Apple-Response: "+ar+"\r\n";
   }
   if(method=="OPTIONS"){
-    extra+="Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER\r
-";
+    extra+="Public: ANNOUNCE, SETUP, RECORD, PAUSE, FLUSH, TEARDOWN, OPTIONS, GET_PARAMETER, SET_PARAMETER\r\n";
     sendRtsp(200,req,extra); return;
   }
   if(method=="ANNOUNCE"){
@@ -219,14 +208,11 @@ void handleRtsp(String req,String body){
     int p=tr.indexOf("control_port="); if(p>=0)remoteControlPort=atoi(tr.c_str()+p+13);
     p=tr.indexOf("timing_port="); if(p>=0)remoteTimingPort=atoi(tr.c_str()+p+12);
     audioUdp.begin(audioPort); controlUdp.begin(controlPort); timingUdp.begin(timingPort);
-    extra="Transport: RTP/AVP/UDP;unicast;mode=record;server_port="+String(audioPort)+";control_port="+String(controlPort)+";timing_port="+String(timingPort)+"\r
-Session: 1\r
-";
+    extra="Transport: RTP/AVP/UDP;unicast;mode=record;server_port="+String(audioPort)+";control_port="+String(controlPort)+";timing_port="+String(timingPort)+"\r\nSession: 1\r\n";
     sendRtsp(200,req,extra); return;
   }
   if(method=="RECORD"){
-    recording=true; extra="Audio-Latency: 11025\r
-"; sendRtsp(200,req,extra); return;
+    recording=true; extra="Audio-Latency: 11025\r\n"; sendRtsp(200,req,extra); return;
   }
   if(method=="FLUSH"){while(audioUdp.parsePacket()>0){uint8_t d[8];audioUdp.read(d,sizeof(d));} if(pcmSink){} sendRtsp(200,req); return;}
   if(method=="TEARDOWN"){recording=false; sendRtsp(200,req); rtspClient.stop(); return;}
@@ -290,8 +276,7 @@ void advertise(){
   };
   mdns_service_add(nullptr,"_raop","_tcp",rtspPort,txt,sizeof(txt)/sizeof(txt[0]));
   mdns_service_instance_name_set("_raop","_tcp",inst);
-  Serial.printf("[AIRPLAY1] advertising %s:%u
-",inst,rtspPort);
+  Serial.printf("[AIRPLAY1] advertising %s:%u\n",inst,rtspPort);
 }
 }
 
@@ -302,8 +287,7 @@ bool airplay1Start(uint16_t port){
   rtspPort=port; if(!rsaInit())Serial.println("[AIRPLAY1] RSA init failed");
   rtspServer=WiFiServer(rtspPort);rtspServer.begin();rtspServer.setNoDelay(true);
   advertise();running=true;recording=false;
-  Serial.printf("[AIRPLAY1] started, free heap=%u
-",ESP.getFreeHeap()); return true;
+  Serial.printf("[AIRPLAY1] started, free heap=%u\n",ESP.getFreeHeap()); return true;
 }
 
 void airplay1Loop(){
@@ -313,13 +297,8 @@ void airplay1Loop(){
     WiFiClient c=rtspServer.accept(); if(c){rtspClient=c;rtspClient.setTimeout(300);Serial.println("[AIRPLAY1] RTSP client connected");}
   }
   if(rtspClient&&rtspClient.connected()&&rtspClient.available()){
-    String req=rtspClient.readStringUntil('
-'); req+="
-"; uint32_t end=millis()+500; int content=0;
-    while(millis()<end){if(!rtspClient.available()){delay(1);continue;}String line=rtspClient.readStringUntil('
-');req+=line;if(line=="\r
-"||line=="
-")break;}
+    String req=rtspClient.readStringUntil('\n'); req+="\n"; uint32_t end=millis()+500; int content=0;
+    while(millis()<end){if(!rtspClient.available()){delay(1);continue;}String line=rtspClient.readStringUntil('\n');req+=line;if(line=="\r\n"||line=="\n")break;}
     content=headerValue(req,"Content-Length").toInt();
     String body; while((int)body.length()<content&&millis()<end){if(rtspClient.available())body+=(char)rtspClient.read();else delay(1);}
     handleRtsp(req,body);
