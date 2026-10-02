@@ -686,9 +686,16 @@ static String makeStatusJson(){
   r+="\"ip\":\""+jsonEscape(ip)+"\",";
   r+="\"hostname\":\""+String(MDNS_HOSTNAME)+".local\",";
   r+="\"rssi\":"+String(rssi)+",";
-  r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
+  String sourceHost = settings.phoneHost;
+  uint16_t sourcePort = settings.tcpPort;
+  if (settings.preferredMode == STREAM_MODE_AIRPLAY1) {
+    sourceHost = (WiFi.status()==WL_CONNECTED) ? WiFi.localIP().toString() : String(MDNS_HOSTNAME)+".local";
+    sourcePort = AIRPLAY_RTSP_PORT;
+  }
+  r+="\"host\":\""+jsonEscape(sourceHost)+"\",";
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
+  r+="\"sourcePort\":"+String(sourcePort)+",";
   r+="\"sampleRate\":"+String(streamFormat.sampleRate)+",";
   r+="\"channels\":"+String(streamFormat.channels)+",";
   r+="\"bits\":"+String(streamFormat.bitsPerSample)+",";
