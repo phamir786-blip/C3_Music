@@ -122,9 +122,9 @@ bool parseFmtp(const String& body){
   if(p<0)return false; p=body.indexOf(' ',p); if(p<0)p=body.indexOf('\t',p); if(p<0)return false;
   int e=body.indexOf("\r\n",p); if(e<0)e=body.indexOf('\n',p); if(e<0)e=body.length();
   String f=body.substring(p+1,e); f.trim();
-  int vals[12]={}; int count=0; char buf[160]; f.toCharArray(buf,sizeof(buf)); char* tok=strtok(buf," ,\t");
-  while(tok&&count<12){vals[count++]=atoi(tok);tok=strtok(nullptr," ,\t");}
-  if(count<12)return false;
+  int vals[11]={}; int count=0; char buf[160]; f.toCharArray(buf,sizeof(buf)); char* tok=strtok(buf," ,\t");
+  while(tok&&count<11){vals[count++]=atoi(tok);tok=strtok(nullptr," ,\t");}
+  if(count<11)return false;
   if(alac)alac_free(alac);
   alac=alac_create(16,2);
   if(!alac)return false;
