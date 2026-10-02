@@ -618,7 +618,7 @@ static void streamTask(void*) {
     else if (tr==STREAM_MODE_HTTP) ok=connectHttpWav();
     else {
       ringClear();
-      streamFormat = StreamFormat{44100, 2, 16, 1, true};
+      streamFormat.sampleRate = DEFAULT_SAMPLE_RATE; streamFormat.channels = DEFAULT_CHANNELS; streamFormat.bitsPerSample = DEFAULT_BITS_PER_SAMPLE; streamFormat.audioFormat = 1; streamFormat.valid = true;
       ok = beginI2S(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS, DEFAULT_BITS_PER_SAMPLE);
       if (ok) {
         airplay1SetPcmSink(airplayPcmSink);
