@@ -582,10 +582,25 @@ static void runConnectedStream() {
   }
 }
 
+static bool airplayPcmSink(const uint8_t* data, size_t len) {
+  if (!data || len == 0) return true;
+  stats.bytesReceived += len;
+  stats.lastReceiveMs = millis();
+  bool ok = ringWrite(data, len);
+  if (!bufferStarted && ringSize() >= targetPrebufferBytes()) {
+    bufferStarted = true;
+    setReceiverState(RX_STREAMING);
+  } else if (receiverState != RX_STREAMING) {
+    setReceiverState(RX_BUFFERING);
+  }
+  return ok;
+}
+
 static void streamTask(void*) {
   for(;;){
     if (WiFi.status()!=WL_CONNECTED){
       stopStreamClient();
+      stopAirplay1();
       endI2S();
       ringClear();
       if (settings.streamEnabled && !stopRequested && receiverState!=RX_WIFI_OFFLINE && receiverState!=RX_WIFI_CONNECTING && receiverState!=RX_UPDATING){
@@ -601,7 +616,15 @@ static void streamTask(void*) {
     bool ok=false; StreamMode tr=settings.preferredMode;
     if (tr==STREAM_MODE_TCP) ok=connectRawTcp();
     else if (tr==STREAM_MODE_HTTP) ok=connectHttpWav();
-    else ok=airplay1Start(AIRPLAY_RTSP_PORT);
+    else {
+      ringClear();
+      streamFormat = StreamFormat{44100, 2, 16, 1, true};
+      ok = beginI2S(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS, DEFAULT_BITS_PER_SAMPLE);
+      if (ok) {
+        airplay1SetPcmSink(airplayPcmSink);
+        ok = airplay1Start(AIRPLAY_RTSP_PORT);
+      }
+    }
     if (!ok && tr != STREAM_MODE_AIRPLAY1 && settings.autoFallback && !stopRequested){
       stopStreamClient(); endI2S(); ringClear();
       StreamMode fb=(tr==STREAM_MODE_TCP)?STREAM_MODE_HTTP:STREAM_MODE_TCP;
