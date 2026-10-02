@@ -353,7 +353,10 @@ void airplay1Loop(){
   // 352-sample ALAC frames arrive about every 8 ms; processing only one
   // packet per loop can otherwise build latency and eventually underrun.
   for(int i=0;i<8 && recording;i++){
-    if(!audioUdp.parsePacket()) break;
+    // processAudio() owns parsePacket(); do not parse the UDP socket twice.
+    // A second parsePacket() here can consume/skip the queued RTP datagram
+    // before processAudio() gets a chance to read it.
+    if(!audioUdp.available() && !audioUdp.parsePacket()) break;
     processAudio();
   }
 }
