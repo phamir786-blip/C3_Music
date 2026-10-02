@@ -90,11 +90,7 @@ bool rsaInit(){
   mbedtls_pk_init(&rsaKey); mbedtls_entropy_init(&entropy); mbedtls_ctr_drbg_init(&ctr);
   const char pers[]="C3Music-AirPlay1";
   if(mbedtls_ctr_drbg_seed(&ctr,mbedtls_entropy_func,&entropy,(const unsigned char*)pers,sizeof(pers)-1)!=0)return false;
-#if MBEDTLS_VERSION_MAJOR >= 4
   int r=mbedtls_pk_parse_key(&rsaKey,(const unsigned char*)AIRPORT_RSA_KEY,strlen(AIRPORT_RSA_KEY)+1,nullptr,0);
-#else
-  int r=mbedtls_pk_parse_key(&rsaKey,(const unsigned char*)AIRPORT_RSA_KEY,strlen(AIRPORT_RSA_KEY)+1,nullptr,0,mbedtls_ctr_drbg_random,&ctr);
-#endif
   if(r!=0){mbedtls_pk_free(&rsaKey);return false;}
   cryptoReady=true; return true;
 }
@@ -105,7 +101,7 @@ String appleResponse(const String& challenge){
   int n=b64(challenge,data,22); if(n<0)return "";
   if(n>16)n=16;
   int pos=n;
-  IPAddress ip=WiFi.localIP(); memcpy(data+pos,ip.raw_address(),4); pos+=4;
+  IPAddress ip=WiFi.localIP(); uint8_t ipBytes[4]={ip[0],ip[1],ip[2],ip[3]}; memcpy(data+pos,ipBytes,4); pos+=4;
   uint8_t mac[6]; esp_read_mac(mac,ESP_MAC_WIFI_STA); memcpy(data+pos,mac,6); pos+=6;
   memset(data+pos,0,32-pos);
   mbedtls_rsa_context* rsa=mbedtls_pk_rsa(rsaKey);
