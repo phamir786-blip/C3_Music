@@ -153,15 +153,22 @@ bool parseFmtp(const String& body){
   if(alac)alac_free(alac);
   alac=alac_create(16,2);
   if(!alac)return false;
-  uint8_t cookie[44]={0};
-  cookie[0]=0;cookie[1]=0;cookie[2]=0;cookie[3]=44;
+  // The ALAC decoder expects the standard 48-byte magic cookie:
+  // size/frma/alac + size/alac + version/flags + the 11 fmtp values.
+  // Keep the 4-byte version/flags field at offset 20; the previous 44-byte
+  // cookie placed max_samples_per_frame at offset 20, shifting every field
+  // by four bytes and leaving the decoder with an invalid frame size.
+  uint8_t cookie[48]={0};
+  cookie[0]=0;cookie[1]=0;cookie[2]=0;cookie[3]=48;
   memcpy(cookie+4,"frma",4); memcpy(cookie+8,"alac",4);
   cookie[12]=0;cookie[13]=0;cookie[14]=0;cookie[15]=36; memcpy(cookie+16,"alac",4);
-  cookie[20]=vals[0]>>24;cookie[21]=vals[0]>>16;cookie[22]=vals[0]>>8;cookie[23]=vals[0];
-  cookie[24]=(uint8_t)vals[1]; cookie[25]=(uint8_t)vals[2]; cookie[26]=(uint8_t)vals[3]; cookie[27]=(uint8_t)vals[4]; cookie[28]=(uint8_t)vals[5]; cookie[29]=(uint8_t)vals[6]; cookie[30]=(uint8_t)(vals[7]>>8); cookie[31]=(uint8_t)vals[7];
-  cookie[32]=(uint8_t)(vals[8]>>24); cookie[33]=(uint8_t)(vals[8]>>16); cookie[34]=(uint8_t)(vals[8]>>8); cookie[35]=(uint8_t)vals[8];
-  cookie[36]=(uint8_t)(vals[9]>>24); cookie[37]=(uint8_t)(vals[9]>>16); cookie[38]=(uint8_t)(vals[9]>>8); cookie[39]=(uint8_t)vals[9];
-  cookie[40]=(uint8_t)(vals[10]>>24); cookie[41]=(uint8_t)(vals[10]>>16); cookie[42]=(uint8_t)(vals[10]>>8); cookie[43]=(uint8_t)vals[10];
+  cookie[24]=(uint8_t)(vals[0]>>24); cookie[25]=(uint8_t)(vals[0]>>16); cookie[26]=(uint8_t)(vals[0]>>8); cookie[27]=(uint8_t)vals[0];
+  cookie[28]=(uint8_t)vals[1]; cookie[29]=(uint8_t)vals[2]; cookie[30]=(uint8_t)vals[3]; cookie[31]=(uint8_t)vals[4];
+  cookie[32]=(uint8_t)vals[5]; cookie[33]=(uint8_t)vals[6];
+  cookie[34]=(uint8_t)(vals[7]>>8); cookie[35]=(uint8_t)vals[7];
+  cookie[36]=(uint8_t)(vals[8]>>24); cookie[37]=(uint8_t)(vals[8]>>16); cookie[38]=(uint8_t)(vals[8]>>8); cookie[39]=(uint8_t)vals[8];
+  cookie[40]=(uint8_t)(vals[9]>>24); cookie[41]=(uint8_t)(vals[9]>>16); cookie[42]=(uint8_t)(vals[9]>>8); cookie[43]=(uint8_t)vals[9];
+  cookie[44]=(uint8_t)(vals[10]>>24); cookie[45]=(uint8_t)(vals[10]>>16); cookie[46]=(uint8_t)(vals[10]>>8); cookie[47]=(uint8_t)vals[10];
   alac_set_info(alac,(char*)cookie);
   Serial.printf("[AIRPLAY1] ALAC %lu Hz, %d-bit, %dch, frame=%d\n",(unsigned long)sampleRate,vals[2],vals[6],vals[0]);
   return true;
