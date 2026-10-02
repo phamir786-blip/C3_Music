@@ -17,6 +17,7 @@
 #include <Wire.h>
 #include <driver/i2s.h>
 #include <math.h>
+#include "airplay1_raop.h"
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
@@ -37,6 +38,7 @@ static constexpr int I2S_DOUT_PIN = 10;
 
 static constexpr uint16_t TCP_DEFAULT_PORT = 50005;
 static constexpr uint16_t HTTP_DEFAULT_PORT = 8080;
+static constexpr uint16_t AIRPLAY_RTSP_PORT = 7000;
 
 static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
 static constexpr uint8_t DEFAULT_CHANNELS = 2;
@@ -55,7 +57,7 @@ static constexpr uint32_t HTTP_HEADER_TIMEOUT_MS = 8000;
 static constexpr uint32_t STREAM_READ_TIMEOUT_MS = 15000;
 static constexpr uint32_t WAV_PARSE_MAX_BYTES = 4096;
 
-enum StreamMode : uint8_t { STREAM_MODE_TCP = 0, STREAM_MODE_HTTP = 1 };
+enum StreamMode : uint8_t { STREAM_MODE_TCP = 0, STREAM_MODE_HTTP = 1, STREAM_MODE_AIRPLAY1 = 2 };
 enum ReceiverState : uint8_t {
   RX_BOOTING = 0, RX_WIFI_CONNECTING, RX_WIFI_OFFLINE, RX_IDLE,
   RX_CONNECTING, RX_BUFFERING, RX_STREAMING, RX_STOPPED, RX_ERROR, RX_UPDATING
@@ -127,6 +129,7 @@ static void loadSettings() {
   if (settings.httpPort == 0) settings.httpPort = HTTP_DEFAULT_PORT;
   if (settings.targetBufferMs < 80) settings.targetBufferMs = 80;
   if (settings.targetBufferMs > 700) settings.targetBufferMs = 700;
+  if (settings.preferredMode > STREAM_MODE_AIRPLAY1) settings.preferredMode = STREAM_MODE_TCP;
 }
 
 static void saveSettings() {
@@ -164,7 +167,11 @@ static const char* receiverStateName(ReceiverState v) {
   }
 }
 
-static const char* streamModeName(StreamMode m) { return m == STREAM_MODE_HTTP ? "HTTP WAV" : "TCP PCM"; }
+static const char* streamModeName(StreamMode m) {
+  if (m == STREAM_MODE_HTTP) return "HTTP WAV";
+  if (m == STREAM_MODE_AIRPLAY1) return "AirPlay 1";
+  return "TCP PCM";
+}
 
 static void setReceiverState(ReceiverState value, const String &error = "") {
   receiverState = value;
@@ -354,6 +361,8 @@ static uint32_t targetPrebufferBytes() {
   if (bytes > 16384) bytes = 16384;
   return (uint32_t)bytes;
 }
+
+static void stopAirplay1() { airplay1Stop(); }
 
 static void stopStreamClient() {
   if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
@@ -586,20 +595,32 @@ static void streamTask(void*) {
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
-    if (!settings.streamEnabled||stopRequested){ streamClient.stop(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
+    if (!settings.streamEnabled||stopRequested){ streamClient.stop(); stopAirplay1(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
     if (millis()-lastStreamAttemptMs<STREAM_RETRY_MS){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
     lastStreamAttemptMs=millis();
     bool ok=false; StreamMode tr=settings.preferredMode;
-    if (tr==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
-    if (!ok && settings.autoFallback && !stopRequested){
+    if (tr==STREAM_MODE_TCP) ok=connectRawTcp();
+    else if (tr==STREAM_MODE_HTTP) ok=connectHttpWav();
+    else ok=airplay1Start(AIRPLAY_RTSP_PORT);
+    if (!ok && tr != STREAM_MODE_AIRPLAY1 && settings.autoFallback && !stopRequested){
       stopStreamClient(); endI2S(); ringClear();
       StreamMode fb=(tr==STREAM_MODE_TCP)?STREAM_MODE_HTTP:STREAM_MODE_TCP;
       Serial.printf("[STREAM] Primary failed; trying %s\n",streamModeName(fb));
       if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     }
-    if (ok){ stats.reconnects++; runConnectedStream(); }
+    if (ok){
+      stats.reconnects++;
+      if (tr == STREAM_MODE_AIRPLAY1) {
+        while (!stopRequested && settings.streamEnabled && WiFi.status()==WL_CONNECTED && airplay1IsRunning()) {
+          airplay1Loop();
+          vTaskDelay(pdMS_TO_TICKS(2));
+        }
+      } else {
+        runConnectedStream();
+      }
+    }
     else { stats.streamErrors++; setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable"); }
-    streamClient.stop(); endI2S(); ringClear();
+    streamClient.stop(); stopAirplay1(); endI2S(); ringClear();
     if (!stopRequested && settings.streamEnabled && settings.autoReconnect) {
       vTaskDelay(pdMS_TO_TICKS(STREAM_RETRY_MS));
     } else {
@@ -671,7 +692,8 @@ static String makeConfigJson(){
   r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
-  r+="\"mode\":\""+String(settings.preferredMode==STREAM_MODE_HTTP?"http":"tcp")+"\",";
+  const char* mode = settings.preferredMode==STREAM_MODE_HTTP ? "http" : (settings.preferredMode==STREAM_MODE_AIRPLAY1 ? "airplay1" : "tcp");
+  r+="\"mode\":\""+String(mode)+"\",";
   r+="\"autoFallback\":"+String(settings.autoFallback?"true":"false")+",";
   r+="\"autoReconnect\":"+String(settings.autoReconnect?"true":"false")+",";
   r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
@@ -709,7 +731,10 @@ static void setupWebServer(){
     uint32_t tp=server.arg("tcpPort").toInt(), hp=server.arg("httpPort").toInt();
     if (tp<1||tp>65535||hp<1||hp>65535){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid port\"}"); return; }
     settings.phoneHost=host; settings.tcpPort=(uint16_t)tp; settings.httpPort=(uint16_t)hp;
-    settings.preferredMode=(server.arg("mode")=="http")?STREAM_MODE_HTTP:STREAM_MODE_TCP;
+    String modeArg=server.arg("mode");
+    if (modeArg=="http") settings.preferredMode=STREAM_MODE_HTTP;
+    else if (modeArg=="airplay1") settings.preferredMode=STREAM_MODE_AIRPLAY1;
+    else settings.preferredMode=STREAM_MODE_TCP;
     uint32_t bm=server.arg("bufferMs").toInt(); if (bm<80||bm>700){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid buffer\"}"); return; }
     settings.autoFallback=(server.arg("autoFallback")=="1"); settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.oledEnabled=(server.arg("oled")=="1"); settings.targetBufferMs=(uint16_t)bm;
     if (oledAvailable) oled.setPowerSave(settings.oledEnabled?0:1);
@@ -731,7 +756,7 @@ void setup(){
   Serial.begin(115200); delay(400);
   Serial.println(); Serial.println("============================================================");
   Serial.printf("%s v%s\n",DEVICE_NAME,FIRMWARE_VERSION);
-  Serial.println("Raw PCM Wi-Fi receiver — TCP primary / HTTP WAV fallback");
+  Serial.println("Wi-Fi audio receiver — TCP / HTTP / experimental AirPlay 1");
   Serial.println("============================================================");
   loadSettings();
   audioDataSemaphore=xSemaphoreCreateBinary();
