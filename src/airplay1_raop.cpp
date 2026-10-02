@@ -297,21 +297,58 @@ bool airplay1Start(uint16_t port){
   Serial.printf("[AIRPLAY1] started, free heap=%u\n",ESP.getFreeHeap()); return true;
 }
 
+void processControl(){
+  while(controlUdp.parsePacket()>0){
+    uint8_t pkt[256];
+    int n=controlUdp.read(pkt,sizeof(pkt));
+    if(n<2) continue;
+    uint8_t type=pkt[1]&0x7f;
+    if(type==0x54){
+      // RAOP sync packet. It is an anchor for the sender's RTP/NTP clock;
+      // no response is required, but it must be drained promptly.
+      if(n>=20) lastRtptime=((uint32_t)pkt[4]<<24)|((uint32_t)pkt[5]<<16)|((uint32_t)pkt[6]<<8)|pkt[7];
+    } else if(type==0x55 || type==0x56){
+      // Retransmission request/response. Keep the control socket drained so
+      // control traffic can never starve the audio receiver.
+    }
+  }
+}
+
 void airplay1Loop(){
   if(!running)return;
   if(!rtspClient||!rtspClient.connected()){
     recording=false; if(rtspClient)rtspClient.stop();
-    WiFiClient c=rtspServer.accept(); if(c){rtspClient=c;rtspClient.setTimeout(300);Serial.println("[AIRPLAY1] RTSP client connected");}
+    WiFiClient c=rtspServer.accept();
+    if(c){rtspClient=c;rtspClient.setTimeout(50);Serial.println("[AIRPLAY1] RTSP client connected");}
   }
+
+  // Never block the main loop for hundreds of milliseconds while streaming.
   if(rtspClient&&rtspClient.connected()&&rtspClient.available()){
-    String req=rtspClient.readStringUntil('\n'); req+="\n"; uint32_t end=millis()+500; int content=0;
-    while(millis()<end){if(!rtspClient.available()){delay(1);continue;}String line=rtspClient.readStringUntil('\n');req+=line;if(line=="\r\n"||line=="\n")break;}
-    content=headerValue(req,"Content-Length").toInt();
-    String body; while((int)body.length()<content&&millis()<end){if(rtspClient.available())body+=(char)rtspClient.read();else delay(1);}
-    handleRtsp(req,body);
+    String req=rtspClient.readStringUntil('\n'); req+="\n";
+    uint32_t end=millis()+25;
+    while(millis()<end){
+      if(!rtspClient.available()) break;
+      String line=rtspClient.readStringUntil('\n');
+      req+=line;
+      if(line=="\r\n"||line=="\n") break;
+    }
+    int content=headerValue(req,"Content-Length").toInt();
+    String body;
+    while((int)body.length()<content && rtspClient.available())
+      body+=(char)rtspClient.read();
+    if((int)body.length()==content) handleRtsp(req,body);
   }
+
   processTiming();
-  processAudio();
+  processControl();
+
+  // Drain a small burst of queued RTP packets each pass. At 44.1 kHz,
+  // 352-sample ALAC frames arrive about every 8 ms; processing only one
+  // packet per loop can otherwise build latency and eventually underrun.
+  for(int i=0;i<8 && recording;i++){
+    if(!audioUdp.parsePacket()) break;
+    processAudio();
+  }
 }
 
 void airplay1Stop(){
