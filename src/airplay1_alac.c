@@ -40,7 +40,7 @@ static const int host_bigendian = 0;
     #include <stdint.h>
 #endif
 
-#include "alac.h"
+#include "airplay1_alac.h"
 
 #define _Swap32(v) do { \
                    v = (((v) & 0x000000FF) << 0x18) | \
