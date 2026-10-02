@@ -163,7 +163,7 @@ bool parseFmtp(const String& body){
   cookie[36]=(uint8_t)(vals[9]>>24); cookie[37]=(uint8_t)(vals[9]>>16); cookie[38]=(uint8_t)(vals[9]>>8); cookie[39]=(uint8_t)vals[9];
   cookie[40]=(uint8_t)(vals[10]>>24); cookie[41]=(uint8_t)(vals[10]>>16); cookie[42]=(uint8_t)(vals[10]>>8); cookie[43]=(uint8_t)vals[10];
   alac_set_info(alac,(char*)cookie);
-  Serial.printf("[AIRPLAY1] ALAC %d Hz, %d-bit, %dch, frame=%d\n",vals[11],vals[2],vals[7],vals[0]);
+  Serial.printf("[AIRPLAY1] ALAC %lu Hz, %d-bit, %dch, frame=%d\n",(unsigned long)sampleRate,vals[2],vals[6],vals[0]);
   return true;
 }
 
@@ -214,6 +214,11 @@ void handleRtsp(String req,String body){
     sendRtsp(200,req,extra); return;
   }
   if(method=="RECORD"){
+    String rtpInfo=headerValue(req,"RTP-Info");
+    int p=rtpInfo.indexOf("seq=");
+    if(p>=0) lastSeq=(uint16_t)atoi(rtpInfo.c_str()+p+4);
+    p=rtpInfo.indexOf("rtptime=");
+    if(p>=0){ lastRtptime=(uint32_t)strtoul(rtpInfo.c_str()+p+8,nullptr,10); recordRtpTime=lastRtptime; }
     recording=true; extra="Audio-Latency: 11025\r\n"; sendRtsp(200,req,extra); return;
   }
   if(method=="FLUSH"){while(audioUdp.parsePacket()>0){uint8_t d[8];audioUdp.read(d,sizeof(d));} if(pcmSink){} sendRtsp(200,req); return;}
