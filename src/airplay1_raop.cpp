@@ -201,9 +201,11 @@ void handleRtsp(String req,String body){
   if(method=="ANNOUNCE"){
     String key=headerValue(body,"rsaaeskey"); if(key.length())decryptAesKey(key);
     String iv=headerValue(body,"aesiv"); if(iv.length()){uint8_t x[32];int n=b64(iv,x,sizeof(x));if(n==16)memcpy(aesIv,x,16);}
-    parseFmtp(body); sendRtsp(200,req); return;
+    if(!parseFmtp(body) || !haveAes){ sendRtsp(400,req); return; }
+    sendRtsp(200,req); return;
   }
   if(method=="SETUP"){
+    remoteIp=rtspClient.remoteIP();
     String tr=headerValue(req,"Transport");
     int p=tr.indexOf("control_port="); if(p>=0)remoteControlPort=atoi(tr.c_str()+p+13);
     p=tr.indexOf("timing_port="); if(p>=0)remoteTimingPort=atoi(tr.c_str()+p+12);
