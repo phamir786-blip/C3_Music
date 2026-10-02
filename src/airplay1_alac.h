@@ -3,6 +3,10 @@
 
 #include <stdint.h>
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 typedef struct alac_file alac_file;
 
 alac_file *alac_create(int samplesize, int numchannels);
@@ -52,6 +56,10 @@ struct alac_file
 
 };
 
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __ALAC__DECOMP_H */
 
