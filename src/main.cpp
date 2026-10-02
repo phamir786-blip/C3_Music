@@ -17,6 +17,7 @@
 #include <Wire.h>
 #include <driver/i2s.h>
 #include <math.h>
+#include "airplay1_raop.h"
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
@@ -37,6 +38,7 @@ static constexpr int I2S_DOUT_PIN = 10;
 
 static constexpr uint16_t TCP_DEFAULT_PORT = 50005;
 static constexpr uint16_t HTTP_DEFAULT_PORT = 8080;
+static constexpr uint16_t AIRPLAY_RTSP_PORT = 7000;
 
 static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
 static constexpr uint8_t DEFAULT_CHANNELS = 2;
@@ -55,7 +57,7 @@ static constexpr uint32_t HTTP_HEADER_TIMEOUT_MS = 8000;
 static constexpr uint32_t STREAM_READ_TIMEOUT_MS = 15000;
 static constexpr uint32_t WAV_PARSE_MAX_BYTES = 4096;
 
-enum StreamMode : uint8_t { STREAM_MODE_TCP = 0, STREAM_MODE_HTTP = 1 };
+enum StreamMode : uint8_t { STREAM_MODE_TCP = 0, STREAM_MODE_HTTP = 1, STREAM_MODE_AIRPLAY1 = 2 };
 enum ReceiverState : uint8_t {
   RX_BOOTING = 0, RX_WIFI_CONNECTING, RX_WIFI_OFFLINE, RX_IDLE,
   RX_CONNECTING, RX_BUFFERING, RX_STREAMING, RX_STOPPED, RX_ERROR, RX_UPDATING
@@ -127,6 +129,7 @@ static void loadSettings() {
   if (settings.httpPort == 0) settings.httpPort = HTTP_DEFAULT_PORT;
   if (settings.targetBufferMs < 80) settings.targetBufferMs = 80;
   if (settings.targetBufferMs > 700) settings.targetBufferMs = 700;
+  if (settings.preferredMode > STREAM_MODE_AIRPLAY1) settings.preferredMode = STREAM_MODE_TCP;
 }
 
 static void saveSettings() {
@@ -164,7 +167,11 @@ static const char* receiverStateName(ReceiverState v) {
   }
 }
 
-static const char* streamModeName(StreamMode m) { return m == STREAM_MODE_HTTP ? "HTTP WAV" : "TCP PCM"; }
+static const char* streamModeName(StreamMode m) {
+  if (m == STREAM_MODE_HTTP) return "HTTP WAV";
+  if (m == STREAM_MODE_AIRPLAY1) return "AirPlay 1";
+  return "TCP PCM";
+}
 
 static void setReceiverState(ReceiverState value, const String &error = "") {
   receiverState = value;
@@ -354,6 +361,8 @@ static uint32_t targetPrebufferBytes() {
   if (bytes > 16384) bytes = 16384;
   return (uint32_t)bytes;
 }
+
+static void stopAirplay1() { airplay1Stop(); }
 
 static void stopStreamClient() {
   if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
@@ -573,10 +582,25 @@ static void runConnectedStream() {
   }
 }
 
+static bool airplayPcmSink(const uint8_t* data, size_t len) {
+  if (!data || len == 0) return true;
+  stats.bytesReceived += len;
+  stats.lastReceiveMs = millis();
+  bool ok = ringWrite(data, len);
+  if (!bufferStarted && ringSize() >= targetPrebufferBytes()) {
+    bufferStarted = true;
+    setReceiverState(RX_STREAMING);
+  } else if (receiverState != RX_STREAMING) {
+    setReceiverState(RX_BUFFERING);
+  }
+  return ok;
+}
+
 static void streamTask(void*) {
   for(;;){
     if (WiFi.status()!=WL_CONNECTED){
       stopStreamClient();
+      stopAirplay1();
       endI2S();
       ringClear();
       if (settings.streamEnabled && !stopRequested && receiverState!=RX_WIFI_OFFLINE && receiverState!=RX_WIFI_CONNECTING && receiverState!=RX_UPDATING){
@@ -586,20 +610,40 @@ static void streamTask(void*) {
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
-    if (!settings.streamEnabled||stopRequested){ streamClient.stop(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
+    if (!settings.streamEnabled||stopRequested){ streamClient.stop(); stopAirplay1(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
     if (millis()-lastStreamAttemptMs<STREAM_RETRY_MS){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
     lastStreamAttemptMs=millis();
     bool ok=false; StreamMode tr=settings.preferredMode;
-    if (tr==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
-    if (!ok && settings.autoFallback && !stopRequested){
+    if (tr==STREAM_MODE_TCP) ok=connectRawTcp();
+    else if (tr==STREAM_MODE_HTTP) ok=connectHttpWav();
+    else {
+      ringClear();
+      streamFormat.sampleRate = DEFAULT_SAMPLE_RATE; streamFormat.channels = DEFAULT_CHANNELS; streamFormat.bitsPerSample = DEFAULT_BITS_PER_SAMPLE; streamFormat.audioFormat = 1; streamFormat.valid = true;
+      ok = beginI2S(DEFAULT_SAMPLE_RATE, DEFAULT_CHANNELS, DEFAULT_BITS_PER_SAMPLE);
+      if (ok) {
+        airplay1SetPcmSink(airplayPcmSink);
+        ok = airplay1Start(AIRPLAY_RTSP_PORT);
+      }
+    }
+    if (!ok && tr != STREAM_MODE_AIRPLAY1 && settings.autoFallback && !stopRequested){
       stopStreamClient(); endI2S(); ringClear();
       StreamMode fb=(tr==STREAM_MODE_TCP)?STREAM_MODE_HTTP:STREAM_MODE_TCP;
       Serial.printf("[STREAM] Primary failed; trying %s\n",streamModeName(fb));
       if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     }
-    if (ok){ stats.reconnects++; runConnectedStream(); }
+    if (ok){
+      stats.reconnects++;
+      if (tr == STREAM_MODE_AIRPLAY1) {
+        while (!stopRequested && settings.streamEnabled && WiFi.status()==WL_CONNECTED && airplay1IsRunning()) {
+          airplay1Loop();
+          vTaskDelay(pdMS_TO_TICKS(2));
+        }
+      } else {
+        runConnectedStream();
+      }
+    }
     else { stats.streamErrors++; setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable"); }
-    streamClient.stop(); endI2S(); ringClear();
+    streamClient.stop(); stopAirplay1(); endI2S(); ringClear();
     if (!stopRequested && settings.streamEnabled && settings.autoReconnect) {
       vTaskDelay(pdMS_TO_TICKS(STREAM_RETRY_MS));
     } else {
@@ -642,9 +686,16 @@ static String makeStatusJson(){
   r+="\"ip\":\""+jsonEscape(ip)+"\",";
   r+="\"hostname\":\""+String(MDNS_HOSTNAME)+".local\",";
   r+="\"rssi\":"+String(rssi)+",";
-  r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
+  String sourceHost = settings.phoneHost;
+  uint16_t sourcePort = settings.tcpPort;
+  if (settings.preferredMode == STREAM_MODE_AIRPLAY1) {
+    sourceHost = (WiFi.status()==WL_CONNECTED) ? WiFi.localIP().toString() : String(MDNS_HOSTNAME)+".local";
+    sourcePort = AIRPLAY_RTSP_PORT;
+  }
+  r+="\"host\":\""+jsonEscape(sourceHost)+"\",";
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
+  r+="\"sourcePort\":"+String(sourcePort)+",";
   r+="\"sampleRate\":"+String(streamFormat.sampleRate)+",";
   r+="\"channels\":"+String(streamFormat.channels)+",";
   r+="\"bits\":"+String(streamFormat.bitsPerSample)+",";
@@ -671,7 +722,8 @@ static String makeConfigJson(){
   r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
-  r+="\"mode\":\""+String(settings.preferredMode==STREAM_MODE_HTTP?"http":"tcp")+"\",";
+  const char* mode = settings.preferredMode==STREAM_MODE_HTTP ? "http" : (settings.preferredMode==STREAM_MODE_AIRPLAY1 ? "airplay1" : "tcp");
+  r+="\"mode\":\""+String(mode)+"\",";
   r+="\"autoFallback\":"+String(settings.autoFallback?"true":"false")+",";
   r+="\"autoReconnect\":"+String(settings.autoReconnect?"true":"false")+",";
   r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
@@ -686,7 +738,7 @@ static void sendJson(int code, const String &body){ server.sendHeader("Cache-Con
 static bool requirePost(){ if (server.method()!=HTTP_POST){ sendJson(405,"{\"ok\":false,\"error\":\"POST required\"}"); return false; } return true; }
 
 static String htmlPage(){
-  return F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>C3 Music Receiver</title><style>:root{--bg:#14121f;--surface:#1e1b2e;--text:#e7e0f4;--muted:#c9c0d5;--primary:#cbb8ff;--onprimary:#2f1765;--outline:#938f9d;--ok:#87e8ae;--bad:#ffb4ab}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{position:sticky;top:0;background:rgba(20,18,31,.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.08);padding:12px 16px}h1{font-size:18px;margin:0}.chip{display:inline-block;border:1px solid var(--outline);border-radius:999px;padding:4px 8px;font-size:12px}.chip.ok{border-color:#4b9965;color:var(--ok)}.chip.bad{border-color:#a65351;color:var(--bad)}main{max-width:800px;margin:0 auto;padding:16px 16px 92px}.tab{display:none}.tab.active{display:block}.card{background:var(--surface);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin-bottom:12px;box-shadow:0 8px 24px rgba(0,0,0,.16)}.row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{text-align:right;max-width:62%;overflow-wrap:anywhere}.hero{font-size:28px;font-weight:800;letter-spacing:-.02em;margin:12px 0 6px;line-height:1.15}.meter{height:8px;background:#332e3e;border-radius:999px;overflow:hidden;margin:14px 0 8px}.meter i{display:block;height:100%;width:0;background:var(--primary);border-radius:inherit;transition:width .25s ease}button{border:0;border-radius:999px;background:var(--primary);color:var(--onprimary);font-weight:700;padding:10px 14px;cursor:pointer}button.secondary{background:transparent;color:var(--primary);border:1px solid #8c78b7}button.danger{background:#ffb4ab;color:#690005}.buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.field{margin:10px 0}.field label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px 4px}input,select{width:100%;border:1px solid var(--outline);background:#272334;color:var(--text);border-radius:10px;padding:10px;font:inherit}.switchrow{display:flex;justify-content:space-between;align-items:center;padding:8px 0}.switch{appearance:none;width:44px;height:24px;border-radius:20px;background:#5c5666;position:relative;border:0}.switch:checked{background:#cbb8ff}.switch:before{content:\"\";position:absolute;width:18px;height:18px;top:3px;left:3px;background:#fff;border-radius:50%;transition:.15s}.switch:checked:before{left:21px;background:#34205f}nav{position:fixed;z-index:20;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:6px;padding:8px max(8px,env(safe-area-inset-left)) calc(8px + env(safe-area-inset-bottom));background:rgba(30,27,46,.96);backdrop-filter:blur(12px);border-top:1px solid rgba(255,255,255,.09)}nav button{min-width:90px;background:transparent;color:var(--muted)}nav button.active{background:#4c3e6d;color:#f0e7ff}.small{font-size:12px;color:var(--muted)}.hidden{display:none!important}h2{font-size:18px;margin:0 0 10px}h3{font-size:15px;margin:0 0 8px}button{min-height:40px}button:disabled{opacity:.55;cursor:not-allowed}@media(max-width:520px){main{padding-left:12px;padding-right:12px}.card{padding:14px}.buttons button{flex:1 1 auto}.value{max-width:58%}nav button{min-width:0;flex:1}.hero{font-size:25px}}.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}#toast{position:fixed;left:50%;bottom:70px;transform:translate(-50%,20px);opacity:0;background:#ece6f5;color:#201b29;border-radius:10px;padding:10px 14px;transition:.2s}#toast.show{opacity:1;transform:translate(-50%,0)}progress{width:100%;height:10px;accent-color:#cbb8ff}</style></head><body><header><h1>C3 Music Receiver <span class=\"chip\" id=\"stateChip\">Loading</span></h1><div class=\"small\" id=\"address\">c3music.local</div></header><main><section class=\"tab active\" id=\"now\"><div class=\"card\"><h2>Now Playing</h2><div class=\"hero\" id=\"state\">Connecting…</div><div class=\"small\" id=\"format\">Waiting for status</div><div class=\"meter\"><i id=\"bufferBar\" style=\"width:0%\"></i></div><div class=\"small\" id=\"bufferText\">Buffer: —</div><div class=\"buttons\"><button onclick=\"act('/api/stream/start')\">Start</button><button class=\"secondary\" onclick=\"act('/api/stream/stop')\">Stop</button><button class=\"secondary\" onclick=\"act('/api/stream/reconnect')\">Reconnect</button></div></div><div class=\"card\"><h3>Source</h3><div class=\"row\"><span class=\"label\">Mode</span><span class=\"value\" id=\"mode\">—</span></div><div class=\"row\"><span class=\"label\">Host</span><span class=\"value\" id=\"host\">—</span></div><div class=\"row\"><span class=\"label\">Session</span><span class=\"value\" id=\"session\">—</span></div></div><div class=\"card\"><h3>Audio health</h3><div class=\"row\"><span class=\"label\">Underruns</span><span class=\"value\" id=\"underruns\">0</span></div><div class=\"row\"><span class=\"label\">Reconnects</span><span class=\"value\" id=\"reconnects\">0</span></div><div class=\"row\"><span class=\"label\">Last error</span><span class=\"value\" id=\"lastError\">None</span></div></div></section><section class=\"tab\" id=\"wifi\"><div class=\"card\"><h2>Wi‑Fi</h2><div class=\"row\"><span class=\"label\">Status</span><span class=\"value\" id=\"wifiStatus\">—</span></div><div class=\"row\"><span class=\"label\">SSID</span><span class=\"value\" id=\"ssid\">—</span></div><div class=\"row\"><span class=\"label\">IP</span><span class=\"value\" id=\"ip\">—</span></div><div class=\"row\"><span class=\"label\">Hostname</span><span class=\"value\">c3music.local</span></div><div class=\"row\"><span class=\"label\">Signal</span><span class=\"value\" id=\"rssi\">—</span></div><div class=\"buttons\"><button onclick=\"act('/api/wifi/reconnect')\">Reconnect Wi‑Fi</button></div></div></section><section class=\"tab\" id=\"settings\"><div class=\"card\"><h2>Stream settings</h2><div class=\"field\"><label>Phone host / IP</label><input id=\"hostInput\" autocomplete=\"off\"></div><div class=\"field\"><label>Preferred stream</label><select id=\"modeInput\"><option value=\"tcp\">Raw TCP PCM — port 50005</option><option value=\"http\">HTTP WAV/PCM — port 8080</option></select></div><div class=\"field\"><label>TCP port</label><input id=\"tcpInput\" type=\"number\" min=\"1\" max=\"65535\"></div><div class=\"field\"><label>HTTP port</label><input id=\"httpInput\" type=\"number\" min=\"1\" max=\"65535\"></div><div class=\"field\"><label>Target buffer (ms)</label><input id=\"bufferInput\" type=\"number\" min=\"80\" max=\"700\" step=\"10\"></div><div class=\"switchrow\"><span>Automatic TCP/HTTP fallback</span><input class=\"switch\" id=\"fallbackInput\" type=\"checkbox\"></div><div class=\"switchrow\"><span>Automatic stream reconnect</span><input class=\"switch\" id=\"autoreconnectInput\" type=\"checkbox\"></div><div class=\"buttons\"><button onclick=\"saveCfg()\">Save and reconnect</button></div></div><div class=\"card\"><h2>Device settings</h2><div class=\"switchrow\"><span>OLED enabled</span><input class=\"switch\" id=\"oledInput\" type=\"checkbox\" onchange=\"saveCfg()\"></div><div class=\"row\"><span class=\"label\">Firmware</span><span class=\"value\" id=\"version\">—</span></div><div class=\"row\"><span class=\"label\">Free heap</span><span class=\"value\" id=\"heap\">—</span></div></div><div class=\"card\"><h2>Firmware OTA</h2><p class=\"small\">Select a .bin file. Streaming will stop during update.</p><input id=\"firmware\" type=\"file\" accept=\".bin\"><div class=\"buttons\"><button id=\"otaBtn\" onclick=\"uploadFw()\">Install firmware</button></div><progress id=\"otaProg\" class=\"hidden\" value=\"0\" max=\"100\"></progress><div class=\"small\" id=\"otaTxt\"></div></div><div class=\"card\"><h2>Maintenance</h2><div class=\"buttons\"><button class=\"secondary\" onclick=\"act('/api/system/clear-stats')\">Clear stats</button><button class=\"secondary\" onclick=\"act('/api/system/reboot')\">Restart</button><button class=\"danger\" onclick=\"if(confirm('Factory reset?'))act('/api/system/factory-reset')\">Factory reset</button></div></div></section></main><nav><button class=\"active\" data-tab=\"now\">Now</button><button data-tab=\"wifi\">Wi‑Fi</button><button data-tab=\"settings\">Settings</button></nav><div id=\"toast\"></div><script>const $=id=>document.getElementById(id);let cfgLoaded=false;function toast(t){const x=$('toast');x.textContent=t;x.classList.add('show');setTimeout(()=>x.classList.remove('show'),2500)}function text(id,v){const e=$(id);if(e)e.textContent=v}function time(s){s=Number(s||0);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),q=s%60;return[h,m,q].map((x,i)=>String(x).padStart(2,'0')).join(':')}function apply(d){text('state',d.state||'—');text('format',`${d.sampleRate||0} Hz · ${d.bits||0}-bit · ${d.channels===2?'Stereo':'Mono'}`);text('mode',d.mode||'—');text('host',`${d.host||'—'} · ${d.mode==='HTTP WAV'?d.httpPort:d.tcpPort}`);text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?`${d.rssi} dBm`:'—');text('address',d.ip?`http://${d.hostname||'c3music.local'} · ${d.ip}`:'c3music.local');text('version',d.version||'—');text('heap',d.heap?`${Math.round(d.heap/1024)} KB`:'—');const p=Number(d.bufferPercent||0);$('bufferBar').style.width=p+'%';text('bufferText',`Buffer: ${p}% · ${d.bufferBytes||0} bytes`);const c=$('stateChip');c.textContent=d.state||'Unknown';c.className='chip '+(d.state==='Streaming'?'ok':d.state==='Error'||d.state==='WiFi offline'?'bad':'')}async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)loadCfg()}catch(e){text('state','Web lost');$('stateChip').textContent='Offline';$('stateChip').className='chip bad'}}async function loadCfg(){try{const d=await (await fetch('/api/config',{cache:'no-store'})).json();$('hostInput').value=d.host||'';$('tcpInput').value=d.tcpPort||50005;$('httpInput').value=d.httpPort||8080;$('modeInput').value=d.mode||'tcp';$('bufferInput').value=d.bufferMs||250;$('fallbackInput').checked=!!d.autoFallback;$('autoreconnectInput').checked=!!d.autoReconnect;$('oledInput').checked=!!d.oled;cfgLoaded=true}catch(e){}}async function act(url){try{const r=await fetch(url,{method:'POST'});const d=await r.json();toast(d.ok?'Done':(d.error||'Failed'));setTimeout(poll,300)}catch(e){toast('Request failed')}}async function saveCfg(){const body=new URLSearchParams({host:$('hostInput').value.trim(),tcpPort:$('tcpInput').value,httpPort:$('httpInput').value,bufferMs:$('bufferInput').value,mode:$('modeInput').value,autoFallback:$('fallbackInput').checked?'1':'0',autoReconnect:$('autoreconnectInput').checked?'1':'0',oled:$('oledInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}function uploadFw(){const f=$('firmware').files[0];if(!f){toast('Choose .bin first');return}if(!confirm(`Install ${f.name}?`))return;const xhr=new XMLHttpRequest(),form=new FormData();form.append('firmware',f);$('otaProg').classList.remove('hidden');$('otaProg').value=0;$('otaTxt').textContent='Uploading…';$('otaBtn').disabled=true;xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('otaProg').value=p;$('otaTxt').textContent=`Uploading ${p}%`}};xhr.onload=()=>{$('otaBtn').disabled=false;if(xhr.status===200){$('otaProg').value=100;$('otaTxt').textContent='Update accepted. Restarting…';toast('Firmware update successful')}else{$('otaTxt').textContent='Update failed: '+xhr.responseText;toast('OTA failed')}};xhr.onerror=()=>{$('otaBtn').disabled=false;$('otaTxt').textContent='Upload failed';toast('OTA failed')};xhr.open('POST','/api/ota');xhr.send(form)}document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');const panel=$(b.dataset.tab);if(panel)panel.classList.add('active');window.scrollTo({top:0,behavior:'smooth'})});poll();setInterval(poll,1000);</script></body></html>");
+  return F("<!doctype html><html lang=\"en\"><head><meta charset=\"utf-8\"><meta name=\"viewport\" content=\"width=device-width,initial-scale=1\"><title>C3 Music Receiver</title><style>:root{--bg:#14121f;--surface:#1e1b2e;--text:#e7e0f4;--muted:#c9c0d5;--primary:#cbb8ff;--onprimary:#2f1765;--outline:#938f9d;--ok:#87e8ae;--bad:#ffb4ab}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,sans-serif}header{position:sticky;top:0;background:rgba(20,18,31,.95);backdrop-filter:blur(12px);border-bottom:1px solid rgba(255,255,255,.08);padding:12px 16px}h1{font-size:18px;margin:0}.chip{display:inline-block;border:1px solid var(--outline);border-radius:999px;padding:4px 8px;font-size:12px}.chip.ok{border-color:#4b9965;color:var(--ok)}.chip.bad{border-color:#a65351;color:var(--bad)}main{max-width:800px;margin:0 auto;padding:16px 16px 92px}.tab{display:none}.tab.active{display:block}.card{background:var(--surface);border:1px solid rgba(255,255,255,.08);border-radius:18px;padding:16px;margin-bottom:12px;box-shadow:0 8px 24px rgba(0,0,0,.16)}.row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(255,255,255,.06)}.row:last-child{border-bottom:0}.label{color:var(--muted)}.value{text-align:right;max-width:62%;overflow-wrap:anywhere}.hero{font-size:28px;font-weight:800;letter-spacing:-.02em;margin:12px 0 6px;line-height:1.15}.meter{height:8px;background:#332e3e;border-radius:999px;overflow:hidden;margin:14px 0 8px}.meter i{display:block;height:100%;width:0;background:var(--primary);border-radius:inherit;transition:width .25s ease}button{border:0;border-radius:999px;background:var(--primary);color:var(--onprimary);font-weight:700;padding:10px 14px;cursor:pointer}button.secondary{background:transparent;color:var(--primary);border:1px solid #8c78b7}button.danger{background:#ffb4ab;color:#690005}.buttons{display:flex;flex-wrap:wrap;gap:8px;margin-top:10px}.field{margin:10px 0}.field label{display:block;color:var(--muted);font-size:12px;margin:0 0 4px 4px}input,select{width:100%;border:1px solid var(--outline);background:#272334;color:var(--text);border-radius:10px;padding:10px;font:inherit}.switchrow{display:flex;justify-content:space-between;align-items:center;padding:8px 0}.switch{appearance:none;width:44px;height:24px;border-radius:20px;background:#5c5666;position:relative;border:0}.switch:checked{background:#cbb8ff}.switch:before{content:\"\";position:absolute;width:18px;height:18px;top:3px;left:3px;background:#fff;border-radius:50%;transition:.15s}.switch:checked:before{left:21px;background:#34205f}nav{position:fixed;z-index:20;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:6px;padding:8px max(8px,env(safe-area-inset-left)) calc(8px + env(safe-area-inset-bottom));background:rgba(30,27,46,.96);backdrop-filter:blur(12px);border-top:1px solid rgba(255,255,255,.09)}nav button{min-width:90px;background:transparent;color:var(--muted)}nav button.active{background:#4c3e6d;color:#f0e7ff}.small{font-size:12px;color:var(--muted)}.hidden{display:none!important}h2{font-size:18px;margin:0 0 10px}h3{font-size:15px;margin:0 0 8px}button{min-height:40px}button:disabled{opacity:.55;cursor:not-allowed}@media(max-width:520px){main{padding-left:12px;padding-right:12px}.card{padding:14px}.buttons button{flex:1 1 auto}.value{max-width:58%}nav button{min-width:0;flex:1}.hero{font-size:25px}}.mono{font-family:ui-monospace,Consolas,monospace;font-size:12px}#toast{position:fixed;left:50%;bottom:70px;transform:translate(-50%,20px);opacity:0;background:#ece6f5;color:#201b29;border-radius:10px;padding:10px 14px;transition:.2s}#toast.show{opacity:1;transform:translate(-50%,0)}progress{width:100%;height:10px;accent-color:#cbb8ff}</style></head><body><header><h1>C3 Music Receiver <span class=\"chip\" id=\"stateChip\">Loading</span></h1><div class=\"small\" id=\"address\">c3music.local</div></header><main><section class=\"tab active\" id=\"now\"><div class=\"card\"><h2>Now Playing</h2><div class=\"hero\" id=\"state\">Connecting…</div><div class=\"small\" id=\"format\">Waiting for status</div><div class=\"meter\"><i id=\"bufferBar\" style=\"width:0%\"></i></div><div class=\"small\" id=\"bufferText\">Buffer: —</div><div class=\"buttons\"><button onclick=\"act('/api/stream/start')\">Start</button><button class=\"secondary\" onclick=\"act('/api/stream/stop')\">Stop</button><button class=\"secondary\" onclick=\"act('/api/stream/reconnect')\">Reconnect</button></div></div><div class=\"card\"><h3>Source</h3><div class=\"row\"><span class=\"label\">Mode</span><span class=\"value\" id=\"mode\">—</span></div><div class=\"row\"><span class=\"label\">Host</span><span class=\"value\" id=\"host\">—</span></div><div class=\"row\"><span class=\"label\">Session</span><span class=\"value\" id=\"session\">—</span></div></div><div class=\"card\"><h3>Audio health</h3><div class=\"row\"><span class=\"label\">Underruns</span><span class=\"value\" id=\"underruns\">0</span></div><div class=\"row\"><span class=\"label\">Reconnects</span><span class=\"value\" id=\"reconnects\">0</span></div><div class=\"row\"><span class=\"label\">Last error</span><span class=\"value\" id=\"lastError\">None</span></div></div></section><section class=\"tab\" id=\"wifi\"><div class=\"card\"><h2>Wi‑Fi</h2><div class=\"row\"><span class=\"label\">Status</span><span class=\"value\" id=\"wifiStatus\">—</span></div><div class=\"row\"><span class=\"label\">SSID</span><span class=\"value\" id=\"ssid\">—</span></div><div class=\"row\"><span class=\"label\">IP</span><span class=\"value\" id=\"ip\">—</span></div><div class=\"row\"><span class=\"label\">Hostname</span><span class=\"value\">c3music.local</span></div><div class=\"row\"><span class=\"label\">Signal</span><span class=\"value\" id=\"rssi\">—</span></div><div class=\"buttons\"><button onclick=\"act('/api/wifi/reconnect')\">Reconnect Wi‑Fi</button></div></div></section><section class=\"tab\" id=\"settings\"><div class=\"card\"><h2>Stream settings</h2><div class=\"field\"><label>Phone host / IP</label><input id=\"hostInput\" autocomplete=\"off\"></div><div class=\"field\"><label>Preferred stream</label><select id=\"modeInput\"><option value=\"tcp\">Raw TCP PCM — port 50005</option><option value=\"http\">HTTP WAV/PCM — port 8080</option><option value=\"airplay1\">AirPlay 1 — experimental</option></select></div><div class=\"field\"><label>TCP port</label><input id=\"tcpInput\" type=\"number\" min=\"1\" max=\"65535\"></div><div class=\"field\"><label>HTTP port</label><input id=\"httpInput\" type=\"number\" min=\"1\" max=\"65535\"></div><div class=\"field\"><label>Target buffer (ms)</label><input id=\"bufferInput\" type=\"number\" min=\"80\" max=\"700\" step=\"10\"></div><div class=\"switchrow\"><span>Automatic TCP/HTTP fallback</span><input class=\"switch\" id=\"fallbackInput\" type=\"checkbox\"></div><div class=\"switchrow\"><span>Automatic stream reconnect</span><input class=\"switch\" id=\"autoreconnectInput\" type=\"checkbox\"></div><div class=\"buttons\"><button onclick=\"saveCfg()\">Save and reconnect</button></div></div><div class=\"card\"><h2>Device settings</h2><div class=\"switchrow\"><span>OLED enabled</span><input class=\"switch\" id=\"oledInput\" type=\"checkbox\" onchange=\"saveCfg()\"></div><div class=\"row\"><span class=\"label\">Firmware</span><span class=\"value\" id=\"version\">—</span></div><div class=\"row\"><span class=\"label\">Free heap</span><span class=\"value\" id=\"heap\">—</span></div></div><div class=\"card\"><h2>Firmware OTA</h2><p class=\"small\">Select a .bin file. Streaming will stop during update.</p><input id=\"firmware\" type=\"file\" accept=\".bin\"><div class=\"buttons\"><button id=\"otaBtn\" onclick=\"uploadFw()\">Install firmware</button></div><progress id=\"otaProg\" class=\"hidden\" value=\"0\" max=\"100\"></progress><div class=\"small\" id=\"otaTxt\"></div></div><div class=\"card\"><h2>Maintenance</h2><div class=\"buttons\"><button class=\"secondary\" onclick=\"act('/api/system/clear-stats')\">Clear stats</button><button class=\"secondary\" onclick=\"act('/api/system/reboot')\">Restart</button><button class=\"danger\" onclick=\"if(confirm('Factory reset?'))act('/api/system/factory-reset')\">Factory reset</button></div></div></section></main><nav><button class=\"active\" data-tab=\"now\">Now</button><button data-tab=\"wifi\">Wi‑Fi</button><button data-tab=\"settings\">Settings</button></nav><div id=\"toast\"></div><script>const $=id=>document.getElementById(id);let cfgLoaded=false;function toast(t){const x=$('toast');x.textContent=t;x.classList.add('show');setTimeout(()=>x.classList.remove('show'),2500)}function text(id,v){const e=$(id);if(e)e.textContent=v}function time(s){s=Number(s||0);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),q=s%60;return[h,m,q].map((x,i)=>String(x).padStart(2,'0')).join(':')}function apply(d){text('state',d.state||'—');text('format',`${d.sampleRate||0} Hz · ${d.bits||0}-bit · ${d.channels===2?'Stereo':'Mono'}`);text('mode',d.mode||'—');text('host',`${d.host||'—'} · ${d.mode==='HTTP WAV'?d.httpPort:d.tcpPort}`);text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?`${d.rssi} dBm`:'—');text('address',d.ip?`http://${d.hostname||'c3music.local'} · ${d.ip}`:'c3music.local');text('version',d.version||'—');text('heap',d.heap?`${Math.round(d.heap/1024)} KB`:'—');const p=Number(d.bufferPercent||0);$('bufferBar').style.width=p+'%';text('bufferText',`Buffer: ${p}% · ${d.bufferBytes||0} bytes`);const c=$('stateChip');c.textContent=d.state||'Unknown';c.className='chip '+(d.state==='Streaming'?'ok':d.state==='Error'||d.state==='WiFi offline'?'bad':'')}async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)loadCfg()}catch(e){text('state','Web lost');$('stateChip').textContent='Offline';$('stateChip').className='chip bad'}}function updateAirplayFields(){const a=$('modeInput').value==='airplay1';['hostInput','tcpInput','httpInput','fallbackInput','autoreconnectInput'].forEach(id=>{const e=$(id);if(e){const p=e.closest('.field,.switchrow');if(p)p.classList.toggle('hidden',a)}})}async function loadCfg(){try{const d=await (await fetch('/api/config',{cache:'no-store'})).json();$('hostInput').value=d.host||'';$('tcpInput').value=d.tcpPort||50005;$('httpInput').value=d.httpPort||8080;$('modeInput').value=d.mode||'tcp';$('bufferInput').value=d.bufferMs||250;$('fallbackInput').checked=!!d.autoFallback;$('autoreconnectInput').checked=!!d.autoReconnect;$('oledInput').checked=!!d.oled;updateAirplayFields();cfgLoaded=true}catch(e){}}async function act(url){try{const r=await fetch(url,{method:'POST'});const d=await r.json();toast(d.ok?'Done':(d.error||'Failed'));setTimeout(poll,300)}catch(e){toast('Request failed')}}async function saveCfg(){const body=new URLSearchParams({host:$('hostInput').value.trim(),tcpPort:$('tcpInput').value,httpPort:$('httpInput').value,bufferMs:$('bufferInput').value,mode:$('modeInput').value,autoFallback:$('fallbackInput').checked?'1':'0',autoReconnect:$('autoreconnectInput').checked?'1':'0',oled:$('oledInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}function uploadFw(){const f=$('firmware').files[0];if(!f){toast('Choose .bin first');return}if(!confirm(`Install ${f.name}?`))return;const xhr=new XMLHttpRequest(),form=new FormData();form.append('firmware',f);$('otaProg').classList.remove('hidden');$('otaProg').value=0;$('otaTxt').textContent='Uploading…';$('otaBtn').disabled=true;xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('otaProg').value=p;$('otaTxt').textContent=`Uploading ${p}%`}};xhr.onload=()=>{$('otaBtn').disabled=false;if(xhr.status===200){$('otaProg').value=100;$('otaTxt').textContent='Update accepted. Restarting…';toast('Firmware update successful')}else{$('otaTxt').textContent='Update failed: '+xhr.responseText;toast('OTA failed')}};xhr.onerror=()=>{$('otaBtn').disabled=false;$('otaTxt').textContent='Upload failed';toast('OTA failed')};xhr.open('POST','/api/ota');xhr.send(form)}document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');const panel=$(b.dataset.tab);if(panel)panel.classList.add('active');window.scrollTo({top:0,behavior:'smooth'})});$('modeInput').addEventListener('change',updateAirplayFields);poll();setInterval(poll,1000);</script></body></html>");
 }
 
 static bool otaUploadFailed=false; static String otaUploadError;
@@ -709,7 +761,10 @@ static void setupWebServer(){
     uint32_t tp=server.arg("tcpPort").toInt(), hp=server.arg("httpPort").toInt();
     if (tp<1||tp>65535||hp<1||hp>65535){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid port\"}"); return; }
     settings.phoneHost=host; settings.tcpPort=(uint16_t)tp; settings.httpPort=(uint16_t)hp;
-    settings.preferredMode=(server.arg("mode")=="http")?STREAM_MODE_HTTP:STREAM_MODE_TCP;
+    String modeArg=server.arg("mode");
+    if (modeArg=="http") settings.preferredMode=STREAM_MODE_HTTP;
+    else if (modeArg=="airplay1") settings.preferredMode=STREAM_MODE_AIRPLAY1;
+    else settings.preferredMode=STREAM_MODE_TCP;
     uint32_t bm=server.arg("bufferMs").toInt(); if (bm<80||bm>700){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid buffer\"}"); return; }
     settings.autoFallback=(server.arg("autoFallback")=="1"); settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.oledEnabled=(server.arg("oled")=="1"); settings.targetBufferMs=(uint16_t)bm;
     if (oledAvailable) oled.setPowerSave(settings.oledEnabled?0:1);
@@ -731,7 +786,7 @@ void setup(){
   Serial.begin(115200); delay(400);
   Serial.println(); Serial.println("============================================================");
   Serial.printf("%s v%s\n",DEVICE_NAME,FIRMWARE_VERSION);
-  Serial.println("Raw PCM Wi-Fi receiver — TCP primary / HTTP WAV fallback");
+  Serial.println("Wi-Fi audio receiver — TCP / HTTP / experimental AirPlay 1");
   Serial.println("============================================================");
   loadSettings();
   audioDataSemaphore=xSemaphoreCreateBinary();
