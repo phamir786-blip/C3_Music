@@ -19,7 +19,7 @@ WiFiClient rtspClient;
 WiFiUDP audioUdp, controlUdp, timingUdp;
 bool running=false, recording=false, haveAes=false;
 uint16_t rtspPort=7000, audioPort=6000, controlPort=6001, timingPort=6002;
-uint16_t remoteControlPort=0, remoteTimingPort=0;
+uint16_t remoteControlPort=0, remoteTimingPort=0;\nuint8_t audioPayloadType=96;\nuint32_t recordRtpTime=0;
 IPAddress remoteIp;
 uint16_t lastSeq=0;
 uint32_t lastRtptime=0;
@@ -97,20 +97,45 @@ bool rsaInit(){
 
 String appleResponse(const String& challenge){
   if(!rsaInit())return "";
-  uint8_t data[32]={}, enc[256]={};
-  int n=b64(challenge,data,22); if(n<0)return "";
+  uint8_t challengeBytes[32]={};
+  int n=b64(challenge,challengeBytes,sizeof(challengeBytes));
+  if(n<0)n=0;
   if(n>16)n=16;
-  int pos=n;
-  IPAddress ip=WiFi.localIP(); uint8_t ipBytes[4]={ip[0],ip[1],ip[2],ip[3]}; memcpy(data+pos,ipBytes,4); pos+=4;
-  uint8_t mac[6]; esp_read_mac(mac,ESP_MAC_WIFI_STA); memcpy(data+pos,mac,6); pos+=6;
-  memset(data+pos,0,32-pos);
+
+  uint8_t data[32]={};
+  uint8_t* p=data;
+  memcpy(p,challengeBytes,n); p+=n;
+
+  IPAddress ip=WiFi.localIP();
+  uint8_t ipBytes[4]={ip[0],ip[1],ip[2],ip[3]};
+  memcpy(p,ipBytes,4); p+=4;
+
+  uint8_t mac[6];
+  esp_read_mac(mac,ESP_MAC_WIFI_STA);
+  memcpy(p,mac,6); p+=6;
+
+  // Apple Challenge is a raw 32-byte message signed with the
+  // AirPort private key using PKCS#1 v1.5 "private encrypt".
+  memset(p,0,sizeof(data)-(size_t)(p-data));
+
   mbedtls_rsa_context* rsa=mbedtls_pk_rsa(rsaKey);
   mbedtls_rsa_set_padding(rsa,MBEDTLS_RSA_PKCS_V15,MBEDTLS_MD_NONE);
-  size_t len=mbedtls_rsa_get_len(rsa);
-  if(len>sizeof(enc))return "";
-  int r=mbedtls_rsa_private(rsa,mbedtls_ctr_drbg_random,&ctr,data,enc);
-  if(r!=0)return "";
-  return b64enc(enc,len,true);
+
+  size_t keyLen=mbedtls_rsa_get_len(rsa);
+  if(keyLen==0||keyLen>256)return "";
+
+  uint8_t* enc=(uint8_t*)malloc(keyLen);
+  if(!enc)return "";
+
+  int r=mbedtls_rsa_pkcs1_encrypt(
+    rsa,nullptr,nullptr,MBEDTLS_RSA_PRIVATE,
+    sizeof(data),data,enc);
+
+  if(r!=0){ free(enc); return ""; }
+
+  String response=b64enc(enc,keyLen,true);
+  free(enc);
+  return response;
 }
 
 bool parseFmtp(const String& body){
@@ -120,7 +145,7 @@ bool parseFmtp(const String& body){
   String f=body.substring(p+1,e); f.trim();
   int vals[11]={}; int count=0; char buf[160]; f.toCharArray(buf,sizeof(buf)); char* tok=strtok(buf," ,\t");
   while(tok&&count<11){vals[count++]=atoi(tok);tok=strtok(nullptr," ,\t");}
-  if(count<11)return false;
+  if(count<11)return false;\n  const uint32_t sampleRate=(uint32_t)vals[10];\n  if(vals[0]<=0||vals[2]!=16||vals[6]!=2||sampleRate==0)return false;
   if(alac)alac_free(alac);
   alac=alac_create(16,2);
   if(!alac)return false;
@@ -190,10 +215,41 @@ void handleRtsp(String req,String body){
   sendRtsp(200,req);
 }
 
+uint64_t ntpNow(){
+  const uint64_t unixSec=(uint64_t)(esp_timer_get_time()/1000000ULL);
+  const uint64_t usec=(uint64_t)(esp_timer_get_time()%1000000ULL);
+  const uint64_t sec=unixSec+2208988800ULL;
+  const uint64_t frac=(usec<<32)/1000000ULL;
+  return (sec<<32)|frac;
+}
+
+void processTiming(){
+  int n=timingUdp.parsePacket();
+  if(n!=32)return;
+  uint8_t req[32];
+  int got=timingUdp.read(req,sizeof(req));
+  if(got!=32||req[0]!=0x80||((req[1]&0x7f)!=0x52)||remoteTimingPort==0)return;
+
+  uint8_t resp[32]={};
+  resp[0]=req[0];
+  resp[1]=(uint8_t)((req[1]&0x80)|0x53);
+  resp[2]=req[2]; resp[3]=req[3];
+  // bytes 4..7 are the zero padding field.
+  memcpy(resp+8,req+24,8); // reference/originate timestamp
+  uint64_t now=ntpNow();
+  for(int i=0;i<8;i++) resp[16+i]=(uint8_t)(now>>(56-8*i));
+  now=ntpNow();
+  for(int i=0;i<8;i++) resp[24+i]=(uint8_t)(now>>(56-8*i));
+
+  timingUdp.beginPacket(remoteIp,remoteTimingPort);
+  timingUdp.write(resp,sizeof(resp));
+  timingUdp.endPacket();
+}
+
 void processAudio(){
   if(!recording||!audioUdp.parsePacket())return;
   static uint8_t pkt[1600]; int n=audioUdp.read(pkt,sizeof(pkt));
-  if(n<12||((pkt[1]&0x7f)!=0x60))return;
+  if(n<12||((pkt[1]&0x7f)!=audioPayloadType))return;
   lastSeq=((uint16_t)pkt[2]<<8)|pkt[3]; lastRtptime=((uint32_t)pkt[4]<<24)|((uint32_t)pkt[5]<<16)|((uint32_t)pkt[6]<<8)|pkt[7];
   int plen=n-12; uint8_t* payload=pkt+12;
   if(haveAes){
@@ -242,7 +298,7 @@ void airplay1Loop(){
     String body; while((int)body.length()<content&&millis()<end){if(rtspClient.available())body+=(char)rtspClient.read();else delay(1);}
     handleRtsp(req,body);
   }
-  processAudio();
+  processTiming();\n  processAudio();
 }
 
 void airplay1Stop(){
