@@ -103,6 +103,9 @@ jobs:
           BUILD_DIR="${{ steps.build_info.outputs.build_dir }}"
 
           cp "$BUILD_DIR/firmware.bin" artifact/
+          # single.bin is the application-only image intended for the device's browser OTA.
+          # Keep firmware.bin as the conventional PlatformIO output as well.
+          cp "$BUILD_DIR/firmware.bin" artifact/single.bin
           if [ "${{ steps.build_info.outputs.has_bootloader }}" = "true" ]; then
             cp "$BUILD_DIR/bootloader.bin" artifact/
           fi
@@ -175,6 +178,7 @@ jobs:
             echo "Build time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             echo ""
             echo "Firmware size: ${{ steps.build_info.outputs.firmware_size }} bytes"
+            echo "single.bin: application-only OTA image (same bytes as firmware.bin)"
             echo "ELF size: ${{ steps.build_info.outputs.elf_size }} bytes"
             echo "Has bootloader: ${{ steps.build_info.outputs.has_bootloader }}"
             echo "Has partitions: ${{ steps.build_info.outputs.has_partitions }}"
@@ -220,7 +224,8 @@ jobs:
             ## Files
 
             - `merged.bin` — full flash image for first USB flash
-            - `firmware.bin` — application image for browser OTA
+            - `single.bin` — single application image for browser OTA
+            - `firmware.bin` — original PlatformIO application image
             - `bootloader.bin`, `partitions.bin`, `boot_app0.bin` — individual components
             - `firmware.elf` — debug symbols
             - `checksums.txt` — SHA-256 checksums
@@ -234,6 +239,7 @@ jobs:
           prerelease: false
           files: |
             artifact/merged.bin
+            artifact/single.bin
             artifact/firmware.bin
             artifact/bootloader.bin
             artifact/partitions.bin
