@@ -816,13 +816,13 @@ function apply(d){
  text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?(d.rssi+' dBm'):'—');text('address',d.ip?('http://'+(d.hostname||'c3music.local')+' · '+d.ip):'c3music.local');text('version',d.version||'—');text('heap',d.heap?(Math.round(d.heap/1024)+' KB'):'—');
  const p=Number(d.bufferPercent||0);$('bufferBar').style.width=p+'%';text('bufferText','Buffer: '+p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('stateChip');c.textContent=d.state||'Unknown';c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Error'||d.state==='WiFi offline'?'bad':''))
 }
-async function poll(){try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)loadCfg()}catch(e){text('state','Web lost');$('stateChip').textContent='Offline';$('stateChip').className='chip bad'}}
+let pollBusy=false;let pollTimer=0;async function poll(){if(pollBusy)return;pollBusy=true;try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)await loadCfg()}catch(e){text('state','Web lost');$('stateChip').textContent='Offline';$('stateChip').className='chip bad'}finally{pollBusy=false}}function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{poll();schedulePoll()},document.visibilityState==='visible'?1000:5000)}
 async function loadCfg(){try{const d=await(await fetch('/api/config',{cache:'no-store'})).json();$('hostInput').value=d.host||'';$('tcpInput').value=d.tcpPort||50005;$('httpInput').value=d.httpPort||8080;$('modeInput').value=d.mode||'tcp';$('bufferInput').value=d.bufferMs||250;$('fallbackInput').checked=!!d.autoFallback;$('autoreconnectInput').checked=!!d.autoReconnect;$('oledInput').checked=!!d.oled;const v=Math.max(0,Math.min(100,Number(d.volume??50)||0));$('volumeInput').value=v;updateVolumeUI(v);setupDropdown();cfgLoaded=true}catch(e){}}
 async function act(url){try{const r=await fetch(url,{method:'POST'}),d=await r.json();toast(d.ok?'Done':(d.error||'Failed'));setTimeout(poll,300)}catch(e){toast('Request failed')}}
 async function saveCfg(){const body=new URLSearchParams({host:$('hostInput').value.trim(),tcpPort:$('tcpInput').value,httpPort:$('httpInput').value,bufferMs:$('bufferInput').value,mode:$('modeInput').value,autoFallback:$('fallbackInput').checked?'1':'0',autoReconnect:$('autoreconnectInput').checked?'1':'0',oled:$('oledInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}
 function uploadFw(){const f=$('firmware').files[0];if(!f){toast('Choose .bin first');return}if(!confirm('Install '+f.name+'?'))return;const xhr=new XMLHttpRequest(),form=new FormData();form.append('firmware',f);$('otaProg').classList.remove('hidden');$('otaProg').value=0;$('otaTxt').textContent='Uploading…';$('otaBtn').disabled=true;xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('otaProg').value=p;$('otaTxt').textContent='Uploading '+p+'%'}};xhr.onload=()=>{$('otaBtn').disabled=false;if(xhr.status===200){$('otaProg').value=100;$('otaTxt').textContent='Update accepted. Restarting…';toast('Firmware update successful')}else{$('otaTxt').textContent='Update failed: '+xhr.responseText;toast('OTA failed')}};xhr.onerror=()=>{$('otaBtn').disabled=false;$('otaTxt').textContent='Upload failed';toast('OTA failed')};xhr.open('POST','/api/ota');xhr.send(form)}
 document.querySelectorAll('nav button').forEach(b=>b.onclick=()=>{document.querySelectorAll('nav button').forEach(x=>x.classList.remove('active'));document.querySelectorAll('.tab').forEach(x=>x.classList.remove('active'));b.classList.add('active');const panel=$(b.dataset.tab);if(panel)panel.classList.add('active');window.scrollTo({top:0,behavior:'smooth'})});
-poll();setInterval(poll,1000);
+poll();schedulePoll();document.addEventListener('visibilitychange',schedulePoll);
 </script></body></html>)HTML";
 }
 
@@ -836,7 +836,7 @@ static void handleFirmwareUpload(){
 }
 
 static void setupWebServer(){
-  server.on("/",HTTP_GET,[]{ server.sendHeader("Cache-Control","no-store,no-cache,must-revalidate,max-age=0"); server.send(200,"text/html; charset=utf-8",htmlPage()); });
+  server.on("/",HTTP_GET,[]{ server.sendHeader("Cache-Control","public,max-age=300,must-revalidate"); server.sendHeader("Vary","Accept-Encoding"); server.send(200,"text/html; charset=utf-8",htmlPage()); });
   server.on("/api/status",HTTP_GET,[]{ sendJson(200,makeStatusJson()); });
   server.on("/api/config",HTTP_GET,[]{ sendJson(200,makeConfigJson()); });
   server.on("/api/config",HTTP_POST,[]{
