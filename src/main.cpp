@@ -717,11 +717,8 @@ static String htmlPage(){
 *{box-sizing:border-box}html{background:#000;color-scheme:dark}
 body{margin:0;background:#000;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;padding-bottom:94px}
 button,input,select{font:inherit}button{touch-action:manipulation}
-header{position:sticky;top:0;z-index:30;padding:18px 18px 15px;background:rgba(0,0,0,.9);border-bottom:1px solid var(--line);backdrop-filter:blur(18px)}
-.appbar{max-width:760px;margin:auto;display:flex;align-items:center;justify-content:space-between;gap:14px}.brand{display:flex;align-items:center;gap:12px;min-width:0}
-.logo{width:42px;height:42px;border-radius:14px;display:grid;place-items:center;background:#fff;color:#000;font-weight:900;font-size:17px;box-shadow:0 0 24px rgba(255,255,255,.08)}
-h1{font-size:18px;line-height:1.15;margin:0;font-weight:760;letter-spacing:-.02em}.small{font-size:12px;color:var(--muted);line-height:1.45}
-#address{margin-top:3px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;max-width:52vw}
+
+.small{font-size:12px;color:var(--muted);line-height:1.45}
 .chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line2);border-radius:999px;background:var(--surface2);font-size:11px;font-weight:700;color:#ddd;white-space:nowrap}
 .chip:before{content:"";width:6px;height:6px;border-radius:50%;background:#777}.chip.ok:before{background:var(--good);box-shadow:0 0 8px rgba(185,246,197,.45)}.chip.bad:before{background:var(--bad)}
 main{max-width:760px;margin:auto;padding:18px 14px}.tab{display:none;animation:enter .18s ease-out}.tab.active{display:block}
@@ -732,7 +729,7 @@ h2{font-size:17px;margin:0;font-weight:720;letter-spacing:-.015em}h3{font-size:1
 .hero{font-size:31px;font-weight:800;letter-spacing:-.04em;margin:3px 0 5px;line-height:1.1}.muted{color:var(--muted)}
 .row{display:flex;justify-content:space-between;align-items:center;gap:14px;min-height:40px;border-bottom:1px solid var(--line);padding:8px 0}.row:last-child{border-bottom:0}
 .label{color:var(--muted)}.value{text-align:right;max-width:62%;overflow-wrap:anywhere}
-.meter{height:7px;background:#171717;border-radius:99px;overflow:hidden;margin:17px 0 8px}.meter i{display:block;height:100%;width:0;background:#fff;border-radius:inherit;transition:width .22s ease;box-shadow:0 0 12px rgba(255,255,255,.25)}
+.meter{height:7px;background:#171717;border-radius:99px;overflow:hidden;margin:17px 0 8px}.meter i{display:block;height:100%;width:0;background:#fff;border-radius:inherit;transition:none;box-shadow:0 0 12px rgba(255,255,255,.25)}
 .buttons{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}
 button.action{min-height:44px;border:1px solid transparent;border-radius:14px;padding:10px 15px;background:#fff;color:#000;font-weight:750;cursor:pointer;transition:transform .16s ease,background .16s ease,border-color .16s ease,box-shadow .16s ease}
 button.action:hover{box-shadow:0 0 0 1px rgba(255,255,255,.12),0 8px 22px rgba(255,255,255,.05)}button.action:active{transform:scale(.97)}
@@ -772,10 +769,9 @@ nav button.active{background:#151515;color:#fff;box-shadow:inset 0 0 0 1px rgba(
 </style>
 </head>
 <body>
-<header><div class="appbar"><div class="brand"><div class="logo">C3</div><div><h1>C3 Music Receiver</h1><div class="small" id="address">c3music.local</div></div></div><span class="chip" id="stateChip">Loading</span></div></header>
 <main>
 <section class="tab active" id="now">
-<div class="card"><div class="section-title"><h2>Now Playing</h2><span class="small">Receiver</span></div><div class="hero" id="state">Connecting…</div><div class="small" id="format">Waiting for status</div><div class="meter"><i id="bufferBar" style="width:0%"></i></div><div class="small" id="bufferText">Buffer: —</div>
+<div class="card"><div class="section-title"><h2>Now Playing</h2><span class="chip" id="deviceStatus">Loading</span></div><div class="hero" id="state">Connecting…</div><div class="small" id="format">Waiting for status</div><div class="meter"><i id="bufferBar" style="width:0%"></i></div><div class="small" id="bufferText">Buffer: —</div>
 <div class="card tight" style="margin:16px 0 0"><div class="slider-head"><h3>Volume</h3><span class="slider-value" id="volumeText">50%</span></div><div class="volume-row"><input id="volumeInput" type="range" min="0" max="100" value="50" oninput="volumePreview(this.value)" onchange="setVolume(this.value)"><button type="button" class="mute-btn" id="muteBtn" onclick="toggleMute()">Mute</button></div><div class="small">Output level</div></div>
 <div class="buttons"><button class="action" onclick="act('/api/stream/start')">Start</button><button class="action secondary" onclick="act('/api/stream/stop')">Stop</button><button class="action secondary" onclick="act('/api/stream/reconnect')">Reconnect</button></div></div>
 <div class="card"><div class="section-title"><h2>Source</h2><span class="small">Live</span></div><div class="row"><span class="label">Mode</span><span class="value" id="mode">—</span></div><div class="row"><span class="label">Host</span><span class="value" id="host">—</span></div><div class="row"><span class="label">Session</span><span class="value" id="session">—</span></div></div>
@@ -811,12 +807,12 @@ function setupDropdown(){
  document.addEventListener('click',e=>{if(!wrap.contains(e.target))wrap.classList.remove('open')});sync()
 }
 function apply(d){
- text('state',d.state||'—');text('format',(d.sampleRate||0)+' Hz · '+(d.bits||0)+'-bit · '+(d.channels===2?'Stereo':'Mono'));text('mode',d.mode||'—');text('host',(d.host||'—')+' · '+(d.mode==='HTTP WAV'?d.httpPort:d.tcpPort));text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');
+ text('state',d.state||'—');text('deviceStatus',d.state||'—');text('format',(d.sampleRate||0)+' Hz · '+(d.bits||0)+'-bit · '+(d.channels===2?'Stereo':'Mono'));text('mode',d.mode||'—');text('host',(d.host||'—')+' · '+(d.mode==='HTTP WAV'?d.httpPort:d.tcpPort));text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');
  const vol=Math.max(0,Math.min(100,Number(d.volume??50)||0)),vi=$('volumeInput');if(vi&&document.activeElement!==vi){vi.value=vol;updateVolumeUI(vol)}
- text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?(d.rssi+' dBm'):'—');text('address',d.ip?('http://'+(d.hostname||'c3music.local')+' · '+d.ip):'c3music.local');text('version',d.version||'—');text('heap',d.heap?(Math.round(d.heap/1024)+' KB'):'—');
- const p=Number(d.bufferPercent||0);$('bufferBar').style.width=p+'%';text('bufferText','Buffer: '+p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('stateChip');c.textContent=d.state||'Unknown';c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Error'||d.state==='WiFi offline'?'bad':''))
+ text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?(d.rssi+' dBm'):'—');text('version',d.version||'—');text('heap',d.heap?(Math.round(d.heap/1024)+' KB'):'—');
+ const p=Number(d.bufferPercent||0);$('bufferBar').style.width=p+'%';text('bufferText','Buffer: '+p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('deviceStatus');c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Error'||d.state==='WiFi offline'?'bad':''))
 }
-let pollBusy=false;let pollTimer=0;async function poll(){if(pollBusy)return;pollBusy=true;try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)await loadCfg()}catch(e){text('state','Web lost');$('stateChip').textContent='Offline';$('stateChip').className='chip bad'}finally{pollBusy=false}}function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{poll();schedulePoll()},document.visibilityState==='visible'?1000:5000)}
+let pollBusy=false;let pollTimer=0;async function poll(){if(pollBusy)return;pollBusy=true;try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)await loadCfg()}catch(e){text('state','Web lost');text('deviceStatus','Offline');$('deviceStatus').className='chip bad'}finally{pollBusy=false}}function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{poll();schedulePoll()},document.visibilityState==='visible'?250:1500)}
 async function loadCfg(){try{const d=await(await fetch('/api/config',{cache:'no-store'})).json();$('hostInput').value=d.host||'';$('tcpInput').value=d.tcpPort||50005;$('httpInput').value=d.httpPort||8080;$('modeInput').value=d.mode||'tcp';$('bufferInput').value=d.bufferMs||250;$('fallbackInput').checked=!!d.autoFallback;$('autoreconnectInput').checked=!!d.autoReconnect;$('oledInput').checked=!!d.oled;const v=Math.max(0,Math.min(100,Number(d.volume??50)||0));$('volumeInput').value=v;updateVolumeUI(v);setupDropdown();cfgLoaded=true}catch(e){}}
 async function act(url){try{const r=await fetch(url,{method:'POST'}),d=await r.json();toast(d.ok?'Done':(d.error||'Failed'));setTimeout(poll,300)}catch(e){toast('Request failed')}}
 async function saveCfg(){const body=new URLSearchParams({host:$('hostInput').value.trim(),tcpPort:$('tcpInput').value,httpPort:$('httpInput').value,bufferMs:$('bufferInput').value,mode:$('modeInput').value,autoFallback:$('fallbackInput').checked?'1':'0',autoReconnect:$('autoreconnectInput').checked?'1':'0',oled:$('oledInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}
