@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - main
+      - feature/ui-highlight-slider-refinement
     tags:
       - 'v*'
   pull_request:
@@ -103,9 +104,6 @@ jobs:
           BUILD_DIR="${{ steps.build_info.outputs.build_dir }}"
 
           cp "$BUILD_DIR/firmware.bin" artifact/
-          # single.bin is the application-only image intended for the device's browser OTA.
-          # Keep firmware.bin as the conventional PlatformIO output as well.
-          cp "$BUILD_DIR/firmware.bin" artifact/single.bin
           if [ "${{ steps.build_info.outputs.has_bootloader }}" = "true" ]; then
             cp "$BUILD_DIR/bootloader.bin" artifact/
           fi
@@ -178,7 +176,6 @@ jobs:
             echo "Build time: $(date -u +"%Y-%m-%dT%H:%M:%SZ")"
             echo ""
             echo "Firmware size: ${{ steps.build_info.outputs.firmware_size }} bytes"
-            echo "single.bin: application-only OTA image (same bytes as firmware.bin)"
             echo "ELF size: ${{ steps.build_info.outputs.elf_size }} bytes"
             echo "Has bootloader: ${{ steps.build_info.outputs.has_bootloader }}"
             echo "Has partitions: ${{ steps.build_info.outputs.has_partitions }}"
@@ -224,8 +221,7 @@ jobs:
             ## Files
 
             - `merged.bin` — full flash image for first USB flash
-            - `single.bin` — single application image for browser OTA
-            - `firmware.bin` — original PlatformIO application image
+            - `firmware.bin` — application image for browser OTA
             - `bootloader.bin`, `partitions.bin`, `boot_app0.bin` — individual components
             - `firmware.elf` — debug symbols
             - `checksums.txt` — SHA-256 checksums
@@ -239,7 +235,6 @@ jobs:
           prerelease: false
           files: |
             artifact/merged.bin
-            artifact/single.bin
             artifact/firmware.bin
             artifact/bootloader.bin
             artifact/partitions.bin
@@ -250,3 +245,33 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  feature_firmware:
+    needs: build
+    runs-on: ubuntu-24.04
+    if: github.ref == 'refs/heads/feature/ui-highlight-slider-refinement'
+    permissions:
+      contents: write
+    timeout-minutes: 10
+
+    steps:
+      - name: Download firmware artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.ARTIFACT_NAME }}
+          path: artifact
+
+      - name: Publish standalone firmware.bin
+        uses: softprops/action-gh-release@v3
+        with:
+          tag_name: feature-ui-latest
+          target_commitish: ${{ github.sha }}
+          name: C3 Music feature build
+          body: |
+            Latest standalone OTA firmware from `feature/ui-highlight-slider-refinement`.
+
+            This is the application-only `firmware.bin` for browser OTA.
+          prerelease: true
+          make_latest: false
+          overwrite_files: true
+          files: artifact/firmware.bin
