@@ -20,7 +20,7 @@ env:
   PYTHON_VERSION: "3.11"
   PLATFORMIO_VERSION: "6.1.18"
   BUILD_ENV: c3music
-  ARTIFACT_NAME: c3music-firmware
+  FIRMWARE_PACKAGE: firmware.zip
 
 jobs:
   build:
@@ -184,11 +184,28 @@ jobs:
 
           cat "$ARTIFACT_DIR/build-info.txt"
 
-      - name: Upload firmware artifact
+      - name: Create firmware.zip
+        run: |
+          set -e
+          cd artifact
+          zip -r ../${{ env.FIRMWARE_PACKAGE }} .
+          cd ..
+          test -s "${{ env.FIRMWARE_PACKAGE }}"
+          ls -lh "${{ env.FIRMWARE_PACKAGE }}" artifact/firmware.bin
+
+      - name: Upload whole firmware.zip artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: artifact
+          name: firmware.zip
+          path: firmware.zip
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload standalone firmware.bin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware.bin
+          path: artifact/firmware.bin
           retention-days: 14
           if-no-files-found: error
 
@@ -204,11 +221,16 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download firmware artifact
+      - name: Download firmware package artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
-          path: artifact
+          name: firmware.zip
+          path: artifact-package
+
+      - name: Extract firmware.zip
+        run: |
+          set -e
+          unzip -q artifact-package/firmware.zip -d artifact
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -255,10 +277,10 @@ jobs:
     timeout-minutes: 10
 
     steps:
-      - name: Download firmware artifact
+      - name: Download standalone firmware.bin artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.ARTIFACT_NAME }}
+          name: firmware.bin
           path: artifact
 
       - name: Publish standalone firmware.bin
