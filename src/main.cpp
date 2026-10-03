@@ -795,9 +795,11 @@ function toast(t){const x=$('toast');x.textContent=t;x.classList.add('show');cle
 function text(id,v){const e=$(id);if(e)e.textContent=v}
 function time(s){s=Number(s||0);const h=Math.floor(s/3600),m=Math.floor(s%3600/60),q=s%60;return[h,m,q].map(x=>String(x).padStart(2,'0')).join(':')}
 function updateVolumeUI(v){const n=Math.max(0,Math.min(100,Number(v)||0));const input=$('volumeInput');if(input)input.style.setProperty('--volume',n+'%');text('volumeText',n+'%');const b=$('muteBtn');if(b){const muted=n===0;b.textContent=muted?'Unmute':'Mute';b.classList.toggle('muted',muted)}}
-function volumePreview(v){const n=Math.max(0,Math.min(100,Number(v)||0));if(n>0)lastVolume=n;updateVolumeUI(n)}
-function toggleMute(){const input=$('volumeInput');if(!input)return;const current=Number(input.value)||0;const target=current>0?0:(lastVolume>0?lastVolume:50);input.value=target;setVolume(target)}
-async function setVolume(v){const n=Math.max(0,Math.min(100,Number(v)||0));if(n>0)lastVolume=n;updateVolumeUI(n);try{const body=new URLSearchParams({value:String(v)});const r=await fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Volume '+Number(v)+'%':(d.error||'Volume change failed'))}catch(e){toast('Volume change failed')}}
+let volumeTimer=0;let volumeChanging=false;let volumeRequest=0;
+function volumePreview(v){const n=Math.max(0,Math.min(100,Number(v)||0));if(n>0)lastVolume=n;updateVolumeUI(n);volumeChanging=true;clearTimeout(volumeTimer);volumeTimer=setTimeout(()=>sendVolume(n,false),40)}
+function toggleMute(){const input=$('volumeInput');if(!input)return;const current=Number(input.value)||0;const target=current>0?0:(lastVolume>0?lastVolume:50);input.value=target;updateVolumeUI(target);setVolume(target)}
+async function sendVolume(v,commit){const n=Math.max(0,Math.min(100,Number(v)||0));const requestId=++volumeRequest;try{const body=new URLSearchParams({value:String(n),commit:commit?'1':'0'});const r=await fetch('/api/volume',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();if(commit&&requestId===volumeRequest)toast(d.ok?'Volume '+n+'%':(d.error||'Volume change failed'))}catch(e){if(commit&&requestId===volumeRequest)toast('Volume change failed')}}
+function setVolume(v){const n=Math.max(0,Math.min(100,Number(v)||0));if(n>0)lastVolume=n;updateVolumeUI(n);volumeChanging=false;clearTimeout(volumeTimer);sendVolume(n,true)}
 function setupDropdown(){
  const wrap=$('modeSelectWrap'),btn=$('modeSelectButton'),native=$('modeInput');if(!wrap||!btn||!native)return;
  const opts=Array.from(wrap.querySelectorAll('.select-option'));
@@ -853,7 +855,7 @@ static void setupWebServer(){
     int v=server.arg("value").toInt();
     if(v<0||v>100){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid volume\"}"); return; }
     settings.volumePercent=(uint8_t)v;
-    preferences.putUChar("volume", settings.volumePercent);
+    if(server.arg("commit")=="1") preferences.putUChar("volume", settings.volumePercent);
     sendJson(200,"{\"ok\":true,\"volume\":"+String(settings.volumePercent)+"}");
   });
   server.on("/api/stream/start",HTTP_POST,[]{ if(!requirePost())return; startStreaming(); sendJson(200,"{\"ok\":true}"); });
