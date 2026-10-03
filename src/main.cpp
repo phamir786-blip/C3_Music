@@ -347,8 +347,7 @@ static void endI2S() {
   if (i2sMux) xSemaphoreGive(i2sMux);
 }
 
-static uint32_t targetPrebufferBytes() {
-  uint64_t bytesPerSecond = (uint64_t)streamFormat.sampleRate *
+static uint32_t targetPrebufferBytes() {  uint64_t bytesPerSecond = (uint64_t)streamFormat.sampleRate *
                             (uint64_t)streamFormat.channels *
                             (uint64_t)(streamFormat.bitsPerSample / 8);
   if (bytesPerSecond == 0) bytesPerSecond =
@@ -697,8 +696,7 @@ static String makeConfigJson(){
   r+="\"bufferMs\":"+String(settings.targetBufferMs)+",";
   r+="\"volume\":"+String(settings.volumePercent)+",";
   r+="\"i2s\":{\"bclk\":"+String(I2S_BCLK_PIN)+",\"lrclk\":"+String(I2S_LRCLK_PIN)+",\"dout\":"+String(I2S_DOUT_PIN)+"}";
-  r+="}";
-  return r;
+  r+="}";  return r;
 }
 
 static void sendJson(int code, const String &body){ server.sendHeader("Cache-Control","no-store,no-cache,must-revalidate,max-age=0"); server.sendHeader("Pragma","no-cache"); server.send(code,"application/json",body); }
@@ -713,23 +711,23 @@ static String htmlPage(){
 <meta name="theme-color" content="#000000">
 <title>C3 Music Receiver</title>
 <style>
-:root{--bg:#000;--surface:#090909;--surface2:#0f0f0f;--text:#f5f5f5;--muted:#9a9a9a;--line:rgba(255,255,255,.09);--line2:rgba(255,255,255,.14);--good:#b9f6c5;--bad:#ffb4ab;--radius:22px}
+:root{--bg:#000;--surface:#090909;--surface2:#101010;--text:#f5f5f5;--muted:#929292;--line:rgba(255,255,255,.085);--line2:rgba(255,255,255,.15);--accent:#9fc5ff;--good:#b9f6c5;--bad:#ffb4ab;--radius:22px}
 *{box-sizing:border-box}html{background:#000;color-scheme:dark}
 body{margin:0;background:#000;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;padding-bottom:94px}
 button,input,select{font:inherit}button{touch-action:manipulation}
 
 .small{font-size:12px;color:var(--muted);line-height:1.45}
-.chip{display:inline-flex;align-items:center;gap:6px;padding:6px 10px;border:1px solid var(--line2);border-radius:999px;background:var(--surface2);font-size:11px;font-weight:700;color:#ddd;white-space:nowrap}
-.chip:before{content:"";width:6px;height:6px;border-radius:50%;background:#777}.chip.ok:before{background:var(--good);box-shadow:0 0 8px rgba(185,246,197,.45)}.chip.bad:before{background:var(--bad)}
+.chip{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--line2);border-radius:999px;background:var(--surface2);font-size:10px;font-weight:800;letter-spacing:.055em;text-transform:uppercase;color:#ddd;white-space:nowrap}
+.chip:before{content:"";width:6px;height:6px;border-radius:50%;background:#777}.chip.ok{color:var(--good);border-color:rgba(185,246,197,.18)}.chip.ok:before{background:var(--good)}.chip.bad{color:var(--bad);border-color:rgba(255,180,171,.2)}.chip.bad:before{background:var(--bad)}
 main{max-width:760px;margin:auto;padding:18px 14px}.tab{display:none;animation:enter .18s ease-out}.tab.active{display:block}
 @keyframes enter{from{opacity:.65;transform:translateY(4px)}to{opacity:1;transform:none}}
-.card{background:linear-gradient(180deg,#0b0b0b,#070707);border:1px solid rgba(255,255,255,.105);border-radius:var(--radius);padding:18px;margin-bottom:12px;box-shadow:0 12px 34px rgba(0,0,0,.3),0 0 20px rgba(255,255,255,.024),inset 0 1px 0 rgba(255,255,255,.038);position:relative;overflow:hidden}.card:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(135deg,rgba(255,255,255,.028),transparent 42%,rgba(255,255,255,.012));}
+.card{background:linear-gradient(180deg,#0b0b0b,#070707);border:1px solid rgba(255,255,255,.105);border-radius:var(--radius);padding:18px;margin-bottom:12px;box-shadow:0 10px 28px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.035);position:relative;overflow:hidden}.card:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(135deg,rgba(255,255,255,.022),transparent 42%,rgba(255,255,255,.008));}
 .card.tight{padding:14px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px}
 h2{font-size:17px;margin:0;font-weight:720;letter-spacing:-.015em}h3{font-size:14px;margin:0;font-weight:680}
-.hero{font-size:31px;font-weight:800;letter-spacing:-.04em;margin:3px 0 5px;line-height:1.1}.muted{color:var(--muted)}
-.row{display:flex;justify-content:space-between;align-items:center;gap:14px;min-height:40px;border-bottom:1px solid var(--line);padding:8px 0}.row:last-child{border-bottom:0}
+.hero{font-size:31px;font-weight:800;letter-spacing:-.04em;margin:5px 0 7px;line-height:1.08}.hero::first-letter{}.muted{color:var(--muted)}
+.format-line{font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.01em}.info-strip{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:11px 13px;border:1px solid var(--line);border-radius:14px;background:#090909;font-size:12px;color:var(--muted)}.info-strip strong{color:#e9e9e9;font-size:13px}.row{display:flex;justify-content:space-between;align-items:center;gap:14px;min-height:40px;border-bottom:1px solid var(--line);padding:8px 0}.row:last-child{border-bottom:0}
 .label{color:var(--muted)}.value{text-align:right;max-width:62%;overflow-wrap:anywhere}
-.meter{height:7px;background:#171717;border-radius:99px;overflow:hidden;margin:17px 0 8px}.meter i{display:block;height:100%;width:0;background:#fff;border-radius:inherit;transition:none;box-shadow:0 0 12px rgba(255,255,255,.25)}
+.meter{height:6px;background:#171717;border-radius:99px;overflow:hidden;margin:16px 0 8px}.meter i{display:block;height:100%;width:0;background:#fff;border-radius:inherit;transition:none}
 .buttons{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}
 button.action{min-height:44px;border:1px solid transparent;border-radius:14px;padding:10px 15px;background:#fff;color:#000;font-weight:750;cursor:pointer;transition:transform .16s ease,background .16s ease,border-color .16s ease,box-shadow .16s ease}
 button.action:hover{box-shadow:0 0 0 1px rgba(255,255,255,.12),0 8px 22px rgba(255,255,255,.05)}button.action:active{transform:scale(.97)}
@@ -743,9 +741,9 @@ input[type=range]::-webkit-slider-runnable-track{height:7px;background:linear-gr
 input[type=range]::-webkit-slider-thumb{appearance:none;width:24px;height:24px;border-radius:50%;background:#fff;margin-top:-9.5px;border:2px solid #000;box-shadow:0 2px 12px rgba(255,255,255,.18),0 0 0 3px rgba(255,255,255,.04);transition:transform .12s ease,box-shadow .12s ease}
 input[type=range]:active::-webkit-slider-thumb{transform:scale(1.08);box-shadow:0 2px 14px rgba(255,255,255,.22),0 0 0 4px rgba(255,255,255,.035)}
 input[type=range]::-moz-range-track{height:5px;background:linear-gradient(90deg,rgba(255,255,255,.72) 0,var(--volume),#252525 var(--volume),100%);border-radius:99px}input[type=range]::-moz-range-progress{height:5px;background:rgba(255,255,255,.72);border-radius:99px}input[type=range]::-moz-range-thumb{width:22px;height:22px;border-radius:50%;background:#fff;border:2px solid #000;box-shadow:0 2px 12px rgba(255,255,255,.16)}
-.volume-row{display:flex;align-items:center;gap:10px}.volume-row input{flex:1;min-width:0}.mute-btn{flex:0 0 auto;height:36px;padding:0 11px;border:1px solid var(--line2);border-radius:12px;background:#101010;color:#d8d8d8;font-size:12px;font-weight:750;cursor:pointer;transition:background .16s ease,border-color .16s ease,transform .12s ease}.mute-btn:hover{border-color:rgba(255,255,255,.22)}.mute-btn:active{transform:scale(.96)}.mute-btn.muted{background:#171111;color:#ffb4ab;border-color:rgba(255,180,171,.22)}
+.volume-row{display:flex;align-items:center;gap:12px}.volume-row input{flex:1;min-width:0}.mute-btn{flex:0 0 auto;height:40px;padding:0 13px;border:1px solid var(--line2);border-radius:12px;background:#101010;color:#d8d8d8;font-size:12px;font-weight:750;cursor:pointer;transition:background .16s ease,border-color .16s ease,transform .12s ease}.mute-btn:hover{border-color:rgba(255,255,255,.22)}.mute-btn:active{transform:scale(.96)}.mute-btn.muted{background:#171111;color:#ffb4ab;border-color:rgba(255,180,171,.22)}
 .settings-intro{margin:-2px 2px 12px;color:var(--muted);font-size:12px;line-height:1.45}.settings-intro strong{color:#ddd;font-weight:700}
-.slider-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:3px}.slider-value{font-size:14px;font-weight:750}
+.slider-head{display:flex;justify-content:space-between;align-items:baseline;margin-bottom:7px}.slider-value{font-size:20px;font-weight:800;letter-spacing:-.03em;color:#fff}
 .switchrow{display:flex;justify-content:space-between;align-items:center;gap:14px;padding:11px 0;border-bottom:1px solid var(--line)}.switchrow:last-child{border-bottom:0}
 .switch{appearance:none;flex:0 0 auto;width:48px;height:28px;border-radius:99px;background:#242424;border:1px solid #3a3a3a;position:relative;outline:none;cursor:pointer;transition:background .18s ease,border-color .18s ease}
 .switch:before{content:"";position:absolute;width:20px;height:20px;left:3px;top:3px;background:#858585;border-radius:50%;transition:transform .18s ease,background .18s ease}
@@ -756,7 +754,7 @@ input[type=range]::-moz-range-track{height:5px;background:linear-gradient(90deg,
 .select-menu{position:absolute;left:0;right:0;top:calc(100% + 7px);z-index:50;background:#0d0d0d;border:1px solid var(--line2);border-radius:16px;padding:6px;box-shadow:0 18px 42px rgba(0,0,0,.7);opacity:0;visibility:hidden;transform:translateY(-5px) scale(.99);transition:opacity .14s ease,transform .14s ease,visibility .14s ease}
 .select-wrap.open .select-menu{opacity:1;visibility:visible;transform:none}.select-option{width:100%;border:0;background:transparent;color:#ddd;text-align:left;border-radius:11px;padding:12px;cursor:pointer;font-size:14px;min-height:43px}
 .select-option:hover{background:#181818}.select-option.selected{background:#fff;color:#000;font-weight:720}.select-native{display:none}
-.status-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:14px}.stat{background:#0a0a0a;border:1px solid var(--line);border-radius:16px;padding:13px;min-height:76px}.stat .k{font-size:11px;color:var(--muted);margin-bottom:7px}.stat .v{font-size:16px;font-weight:720;overflow-wrap:anywhere}
+.status-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:10px;margin-top:12px}.stat{background:#090909;border:1px solid var(--line);border-radius:16px;padding:13px;min-height:76px}.stat .k{font-size:11px;color:var(--muted);margin-bottom:7px}.stat .v{font-size:17px;font-weight:760;overflow-wrap:anywhere}
 .file{width:100%;padding:12px;border:1px dashed var(--line2);border-radius:15px;background:#070707;color:#bbb}.file::file-selector-button{border:1px solid var(--line2);background:#151515;color:#fff;border-radius:10px;padding:8px 11px;margin-right:9px;font-weight:650}
 progress{width:100%;height:8px;accent-color:#fff;margin-top:12px}
 nav{position:fixed;z-index:40;bottom:0;left:0;right:0;display:flex;justify-content:center;gap:6px;padding:8px 10px calc(8px + env(safe-area-inset-bottom));background:rgba(0,0,0,.88);backdrop-filter:blur(18px);border-top:1px solid var(--line)}
@@ -764,17 +762,17 @@ nav .nav-inner{width:min(520px,100%);display:flex;gap:6px}nav button{flex:1;min-
 nav button.active{background:#151515;color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.07)}nav button:active{transform:scale(.97)}
 #toast{position:fixed;z-index:80;left:50%;bottom:88px;transform:translate(-50%,14px);opacity:0;pointer-events:none;background:#f2f2f2;color:#050505;border-radius:14px;padding:11px 15px;font-size:13px;font-weight:700;box-shadow:0 12px 30px rgba(0,0,0,.45);transition:opacity .18s ease,transform .18s ease;max-width:calc(100vw - 28px);text-align:center}
 #toast.show{opacity:1;transform:translate(-50%,0)}.hidden{display:none!important}
-@media(max-width:520px){header{padding:15px 13px 13px}main{padding:14px 11px}.card{padding:16px;border-radius:20px}.hero{font-size:27px}.buttons button{flex:1 1 auto}.value{max-width:58%}}
+@media(max-width:520px){main{padding:14px 11px}.card{padding:16px;border-radius:20px}.hero{font-size:27px}.buttons button{flex:1 1 auto}.value{max-width:58%}.volume-row{gap:9px}.mute-btn{padding:0 11px}.info-strip{margin-top:14px}}
 @media(prefers-reduced-motion:reduce){*,*:before,*:after{animation-duration:.01ms!important;transition-duration:.01ms!important}}
 </style>
 </head>
 <body>
 <main>
 <section class="tab active" id="now">
-<div class="card"><div class="section-title"><h2>Now Playing</h2><span class="chip" id="deviceStatus">Loading</span></div><div class="hero" id="state">Connecting…</div><div class="small" id="format">Waiting for status</div><div class="meter"><i id="bufferBar" style="width:0%"></i></div><div class="small" id="bufferText">Buffer: —</div>
+<div class="card"><div class="section-title"><h2>Now Playing</h2><span class="chip" id="deviceStatus">Loading</span></div><div class="hero" id="state">Connecting…</div><div class="format-line" id="format">Waiting for status</div><div class="info-strip"><span>Buffer</span><strong id="bufferText">—</strong></div>
 <div class="card tight" style="margin:16px 0 0"><div class="slider-head"><h3>Volume</h3><span class="slider-value" id="volumeText">50%</span></div><div class="volume-row"><input id="volumeInput" type="range" min="0" max="100" value="50" oninput="volumePreview(this.value)" onchange="setVolume(this.value)"><button type="button" class="mute-btn" id="muteBtn" onclick="toggleMute()">Mute</button></div><div class="small">Output level</div></div>
 <div class="buttons"><button class="action" onclick="act('/api/stream/start')">Start</button><button class="action secondary" onclick="act('/api/stream/stop')">Stop</button><button class="action secondary" onclick="act('/api/stream/reconnect')">Reconnect</button></div></div>
-<div class="card"><div class="section-title"><h2>Source</h2><span class="small">Live</span></div><div class="row"><span class="label">Mode</span><span class="value" id="mode">—</span></div><div class="row"><span class="label">Host</span><span class="value" id="host">—</span></div><div class="row"><span class="label">Session</span><span class="value" id="session">—</span></div></div>
+<div class="card"><div class="section-title"><h2>Stream</h2><span class="small">Connection</span></div><div class="row"><span class="label">Transport</span><span class="value" id="mode">—</span></div><div class="row"><span class="label">Source</span><span class="value" id="host">—</span></div><div class="row"><span class="label">Session</span><span class="value" id="session">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Audio health</h2><span class="small">Diagnostics</span></div><div class="status-grid"><div class="stat"><div class="k">Underruns</div><div class="v" id="underruns">0</div></div><div class="stat"><div class="k">Reconnects</div><div class="v" id="reconnects">0</div></div></div><div class="row" style="margin-top:8px"><span class="label">Last error</span><span class="value" id="lastError">None</span></div></div>
 </section>
 <section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="small">Network</span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons"><button class="action" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
@@ -812,7 +810,7 @@ function apply(d){
  text('state',d.state||'—');text('deviceStatus',d.state||'—');text('format',(d.sampleRate||0)+' Hz · '+(d.bits||0)+'-bit · '+(d.channels===2?'Stereo':'Mono'));text('mode',d.mode||'—');text('host',(d.host||'—')+' · '+(d.mode==='HTTP WAV'?d.httpPort:d.tcpPort));text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');
  const vol=Math.max(0,Math.min(100,Number(d.volume??50)||0)),vi=$('volumeInput');if(vi&&document.activeElement!==vi){vi.value=vol;updateVolumeUI(vol)}
  text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?(d.rssi+' dBm'):'—');text('version',d.version||'—');text('heap',d.heap?(Math.round(d.heap/1024)+' KB'):'—');
- const p=Number(d.bufferPercent||0);$('bufferBar').style.width=p+'%';text('bufferText','Buffer: '+p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('deviceStatus');c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Error'||d.state==='WiFi offline'?'bad':''))
+ const p=Number(d.bufferPercent||0);text('bufferText',p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('deviceStatus');c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Error'||d.state==='WiFi offline'?'bad':''))
 }
 let pollBusy=false;let pollTimer=0;async function poll(){if(pollBusy)return;pollBusy=true;try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)await loadCfg()}catch(e){text('state','Web lost');text('deviceStatus','Offline');$('deviceStatus').className='chip bad'}finally{pollBusy=false}}function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{poll();schedulePoll()},document.visibilityState==='visible'?250:1500)}
 async function loadCfg(){try{const d=await(await fetch('/api/config',{cache:'no-store'})).json();$('hostInput').value=d.host||'';$('tcpInput').value=d.tcpPort||50005;$('httpInput').value=d.httpPort||8080;$('modeInput').value=d.mode||'tcp';$('bufferInput').value=d.bufferMs||250;$('fallbackInput').checked=!!d.autoFallback;$('autoreconnectInput').checked=!!d.autoReconnect;$('oledInput').checked=!!d.oled;const v=Math.max(0,Math.min(100,Number(d.volume??50)||0));$('volumeInput').value=v;updateVolumeUI(v);setupDropdown();cfgLoaded=true}catch(e){}}
