@@ -384,7 +384,6 @@ static void stopStreamClient() {
   if (streamClientMux) xSemaphoreGive(streamClientMux);
 }
 
-// Fixed I2S configuration supporting 16-bit and 24-bit at 44.1kHz and 48kHz
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   if ((bits!=16 && bits!=24) || (ch!=1 && ch!=2)) return false;
   
@@ -402,8 +401,8 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
     .dma_buf_count = 8,
     .dma_buf_len = 512,
-    .use_apll = false,          // ESP32-C3 does NOT support APLL!
-    .tx_desc_auto_clear = true,  // Automatically clears DMA buffer on underrun
+    .use_apll = false,
+    .tx_desc_auto_clear = true,
     .fixed_mclk = 0
   };
   
@@ -554,12 +553,11 @@ static void playbackTask(void*) {
           samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
         }
       } else if (streamFormat.bitsPerSample == 24) {
-        // 24-bit PCM: 3 bytes per sample
         size_t sampleCount = n / 3;
         for (size_t i = 0; i < sampleCount; ++i) {
           size_t idx = i * 3;
           int32_t s = (int32_t)((uint32_t)in[idx] | ((uint32_t)in[idx+1] << 8) | ((uint32_t)in[idx+2] << 16));
-          if (s & 0x00800000) s |= 0xFF000000; // Sign extend
+          if (s & 0x00800000) s |= 0xFF000000;
           s = (s * volume) / 100;
           in[idx]     = (uint8_t)(s & 0xFF);
           in[idx + 1] = (uint8_t)((s >> 8) & 0xFF);
@@ -609,14 +607,12 @@ static void runConnectedStream() {
     if (av>0){
       // Check for C3 dynamic format header: "C3MS" (16 bytes)
       if (!checkedHeader && av >= 16) {
-        uint8_t peekBuf[16];
-        if (streamClient.peekBytes(peekBuf, 16) >= 16) {
-          if (peekBuf[0] == 'C' && peekBuf[1] == '3' && peekBuf[2] == 'M' && peekBuf[3] == 'S') {
-            // Read and consume header
-            streamClient.readBytes(peekBuf, 16);
-            uint8_t bits = peekBuf[5];
-            uint16_t ch = peekBuf[6];
-            uint32_t sr = (uint32_t)peekBuf[8] | ((uint32_t)peekBuf[9] << 8) | ((uint32_t)peekBuf[10] << 16) | ((uint32_t)peekBuf[11] << 24);
+        uint8_t hdr[16];
+        if (streamClient.readBytes(hdr, 16) == 16) {
+          if (hdr[0] == 'C' && hdr[1] == '3' && hdr[2] == 'M' && hdr[3] == 'S') {
+            uint8_t bits = hdr[5];
+            uint16_t ch = hdr[6];
+            uint32_t sr = (uint32_t)hdr[8] | ((uint32_t)hdr[9] << 8) | ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
             Serial.printf("[C3MS HEADER] Detected format: %lu Hz, %u-bit, %u ch\n", (unsigned long)sr, bits, ch);
             if ((bits == 16 || bits == 24) && (ch == 1 || ch == 2) && (sr >= 8000 && sr <= 96000)) {
               if (sr != streamFormat.sampleRate || bits != streamFormat.bitsPerSample || ch != streamFormat.channels) {
@@ -627,20 +623,26 @@ static void runConnectedStream() {
                 beginI2S(sr, ch, bits);
               }
             }
+          } else {
+            // Not a header: these 16 bytes are raw PCM audio, write them to ring buffer
+            ringWrite(hdr, 16);
+            stats.bytesReceived += 16;
           }
         }
         checkedHeader = true;
       }
 
       size_t w=min((size_t)streamClient.available(), sizeof(in));
-      int n=streamClient.read(in,w);
-      if (n>0){
-        stats.bytesReceived+=n;
-        stats.lastReceiveMs=millis();
-        if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(2));
-        if (!bufferStarted && ringSize()>=targetPrebufferBytes()){
-          bufferStarted=true;
-          setReceiverState(RX_STREAMING);
+      if (w > 0) {
+        int n=streamClient.read(in,w);
+        if (n>0){
+          stats.bytesReceived+=n;
+          stats.lastReceiveMs=millis();
+          if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(2));
+          if (!bufferStarted && ringSize()>=targetPrebufferBytes()){
+            bufferStarted=true;
+            setReceiverState(RX_STREAMING);
+          }
         }
       }
     }
