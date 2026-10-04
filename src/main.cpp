@@ -44,7 +44,7 @@ static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 16;
 
 static constexpr uint8_t C3_PROTOCOL_VERSION = 1;
 static constexpr size_t C3_FORMAT_HEADER_BYTES = 16;
-static constexpr uint32_t TCP_FORMAT_HEADER_TIMEOUT_MS = 250;
+static constexpr uint32_t TCP_FORMAT_HEADER_TIMEOUT_MS = 1000;
 
 // 128 KB Ring Buffer for zero-choppy streaming
 static constexpr size_t AUDIO_RING_BYTES = 131072;
@@ -385,7 +385,8 @@ static uint32_t targetPrebufferBytes() {
       (uint64_t)DEFAULT_SAMPLE_RATE * DEFAULT_CHANNELS * (DEFAULT_BITS_PER_SAMPLE / 8);
   uint64_t bytes = (bytesPerSecond * settings.targetBufferMs) / 1000ULL;
   if (bytes < 4096) bytes = 4096;
-  if (bytes > 16384) bytes = 16384;
+  const uint64_t maxBufferBytes = (uint64_t)AUDIO_RING_BYTES - 4096ULL;
+  if (bytes > maxBufferBytes) bytes = maxBufferBytes;
   return (uint32_t)bytes;
 }
 
@@ -679,8 +680,9 @@ static void playbackTask(void*) {
   }
 }
 
-static void runConnectedStream() {
+static bool runConnectedStream() {
   uint8_t in[NETWORK_READ_BYTES];
+  bool streamFailed=false;
   stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
 
   if (tcpPrefetchLen > 0) {
@@ -707,16 +709,20 @@ static void runConnectedStream() {
     else {
       if (!streamClient.connected()) {
         stats.lastError="Stream disconnected";
+        streamFailed=true;
         break;
       }
-      if (!bufferStarted && millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS) {
-        stats.lastError="Stream idle";
-        setReceiverState(RX_BUFFERING,"Waiting for audio");
-        stats.lastReceiveMs=millis();
+      if (millis()-stats.lastReceiveMs>STREAM_READ_TIMEOUT_MS) {
+        stats.lastError=bufferStarted?"Stream stalled":"Stream idle";
+        setReceiverState(RX_ERROR, stats.lastError);
+        streamFailed=true;
+        break;
       }
       vTaskDelay(pdMS_TO_TICKS(1));
     }
   }
+
+  return streamFailed && !stopRequested && WiFi.status()==WL_CONNECTED;
 }
 
 static void streamTask(void*) {
@@ -735,15 +741,33 @@ static void streamTask(void*) {
     if (!settings.streamEnabled||stopRequested){ streamClient.stop(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
     if (millis()-lastStreamAttemptMs<STREAM_RETRY_MS){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
     lastStreamAttemptMs=millis();
-    bool ok=false; StreamMode tr=settings.preferredMode;
+    bool ok=false; StreamMode tr=settings.preferredMode; StreamMode activeMode=tr;
     if (tr==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     if (!ok && settings.autoFallback && !stopRequested){
       stopStreamClient(); endI2S(); ringClear();
       StreamMode fb=(tr==STREAM_MODE_TCP)?STREAM_MODE_HTTP:STREAM_MODE_TCP;
+      activeMode=fb;
       Serial.printf("[STREAM] Primary failed; trying %s\n",streamModeName(fb));
       if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     }
-    if (ok){ stats.reconnects++; runConnectedStream(); }
+    if (ok){
+      stats.reconnects++;
+      bool streamFailed=runConnectedStream();
+      if (streamFailed && settings.autoFallback && !stopRequested && WiFi.status()==WL_CONNECTED){
+        stopStreamClient(); endI2S(); ringClear();
+        StreamMode fb=(activeMode==STREAM_MODE_TCP)?STREAM_MODE_HTTP:STREAM_MODE_TCP;
+        activeMode=fb;
+        Serial.printf("[STREAM] Active stream failed; trying %s fallback\n",streamModeName(fb));
+        if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
+        if (ok){
+          stats.reconnects++;
+          runConnectedStream();
+        } else {
+          stats.streamErrors++;
+          setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Fallback unavailable");
+        }
+      }
+    }
     else { stats.streamErrors++; setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable"); }
     streamClient.stop(); endI2S(); ringClear();
     if (!stopRequested && settings.streamEnabled && settings.autoReconnect) {
