@@ -149,14 +149,6 @@ jobs:
           MERGED_SIZE=$(stat -c%s "$ARTIFACT_DIR/merged.bin" 2>/dev/null || stat -f%z "$ARTIFACT_DIR/merged.bin")
           echo "Merged image size: $MERGED_SIZE bytes"
 
-      - name: Generate checksums
-        run: |
-          set -e
-          cd artifact
-          sha256sum *.bin *.elf > checksums.txt 2>/dev/null || \
-            shasum -a 256 *.bin *.elf > checksums.txt
-          cat checksums.txt
-
       - name: Write build-info.txt
         run: |
           set -e
@@ -165,7 +157,7 @@ jobs:
 
           {
             echo "Device: C3 Music Receiver"
-            echo "Firmware version: 1.0.0"
+            echo "Firmware version: 1.3.1-HQ"
             echo "Build environment: ${{ env.BUILD_ENV }}"
             echo "PlatformIO version: ${{ env.PLATFORMIO_VERSION }}"
             echo "Python version: ${{ env.PYTHON_VERSION }}"
@@ -183,7 +175,31 @@ jobs:
 
           cat "$ARTIFACT_DIR/build-info.txt"
 
-      - name: Upload firmware artifact
+      - name: Create all-binaries ZIP archive
+        run: |
+          set -e
+          cd artifact
+          sudo apt-get update -qq && sudo apt-get install -y zip -qq
+          zip -9 c3music-all-binaries.zip *.bin *.txt
+          echo "Generated ZIP size: $(stat -c%s c3music-all-binaries.zip 2>/dev/null || stat -f%z c3music-all-binaries.zip) bytes"
+
+      - name: Generate checksums
+        run: |
+          set -e
+          cd artifact
+          sha256sum *.bin *.elf *.zip > checksums.txt 2>/dev/null || \
+            shasum -a 256 *.bin *.elf *.zip > checksums.txt
+          cat checksums.txt
+
+      - name: Upload standalone firmware.bin
+        uses: actions/upload-artifact@v4
+        with:
+          name: firmware-bin
+          path: artifact/firmware.bin
+          retention-days: 14
+          if-no-files-found: error
+
+      - name: Upload all binaries package
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.ARTIFACT_NAME }}
@@ -219,22 +235,22 @@ jobs:
 
             ## Files
 
-            - `merged.bin` — full flash image for first USB flash
-            - `firmware.bin` — application image for browser OTA
-            - `bootloader.bin`, `partitions.bin`, `boot_app0.bin` — individual components
+            - `firmware.bin` — single application binary for instant Web OTA update
+            - `c3music-all-binaries.zip` — all binaries packaged in a single zip archive
+            - `merged.bin` — full flash image for first USB flash via esptool
+            - `bootloader.bin`, `partitions.bin`, `boot_app0.bin` — individual component binaries
             - `firmware.elf` — debug symbols
             - `checksums.txt` — SHA-256 checksums
             - `build-info.txt` — build metadata
 
-            ## Usage
-
-            - First flash: use `merged.bin` with esptool or your preferred flashing tool.
-            - Later updates: upload `firmware.bin` via the device web interface.
+            ## Quick Update
+            - Upload `firmware.bin` directly on `http://c3music.local/` under **Settings ➔ Firmware OTA**.
           draft: false
           prerelease: false
           files: |
-            artifact/merged.bin
             artifact/firmware.bin
+            artifact/c3music-all-binaries.zip
+            artifact/merged.bin
             artifact/bootloader.bin
             artifact/partitions.bin
             artifact/boot_app0.bin
