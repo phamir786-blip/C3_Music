@@ -157,7 +157,7 @@ jobs:
 
           {
             echo "Device: C3 Music Receiver"
-            echo "Firmware version: 1.3.1-HQ"
+            echo "Firmware version: 1.4.0"
             echo "Build environment: ${{ env.BUILD_ENV }}"
             echo "PlatformIO version: ${{ env.PLATFORMIO_VERSION }}"
             echo "Python version: ${{ env.PYTHON_VERSION }}"
