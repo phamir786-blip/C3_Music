@@ -93,6 +93,7 @@ struct Settings {
 
 static U8G2_SSD1306_72X40_ER_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 static bool oledAvailable = false;
+static bool oledStreamingDisabled = false;
 static Preferences preferences;
 static WebServer server(80);
 static WiFiClient streamClient;
@@ -256,8 +257,27 @@ static void displayLineCenter(const char *text, uint8_t y, const uint8_t *font) 
 
 static void displayUpdate() {
   if (!oledAvailable || !settings.oledEnabled) return;
-  // Performance fix: pause OLED redraws while streaming to prevent I2C audio jitter
-  if (receiverState == RX_STREAMING) return;
+
+  // Streaming rule: completely deactivate the OLED while audio is streaming.
+  // This removes OLED redraw/I2C activity from the real-time audio path.
+  if (receiverState == RX_STREAMING) {
+    if (!oledStreamingDisabled) {
+      oled.setPowerSave(1);
+      oledStreamingDisabled = true;
+      Serial.println("[OLED] Deactivated during streaming");
+    }
+    return;
+  }
+
+  // Restore the OLED as soon as streaming stops or leaves the streaming state.
+  if (oledStreamingDisabled) {
+    oled.setPowerSave(0);
+    oled.clearBuffer();
+    oled.sendBuffer();
+    oledStreamingDisabled = false;
+    Serial.println("[OLED] Reactivated");
+  }
+
   if (millis() - lastOledRefreshMs < OLED_REFRESH_MS) return;
   lastOledRefreshMs = millis();
   char buf[32];
