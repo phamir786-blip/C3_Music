@@ -4,7 +4,6 @@ on:
   push:
     branches:
       - main
-      - feature/ui-highlight-slider-refinement
     tags:
       - 'v*'
   pull_request:
@@ -20,7 +19,7 @@ env:
   PYTHON_VERSION: "3.11"
   PLATFORMIO_VERSION: "6.1.18"
   BUILD_ENV: c3music
-  FIRMWARE_PACKAGE: firmware.zip
+  ARTIFACT_NAME: c3music-firmware
 
 jobs:
   build:
@@ -184,28 +183,11 @@ jobs:
 
           cat "$ARTIFACT_DIR/build-info.txt"
 
-      - name: Create firmware.zip
-        run: |
-          set -e
-          cd artifact
-          zip -r ../${{ env.FIRMWARE_PACKAGE }} .
-          cd ..
-          test -s "${{ env.FIRMWARE_PACKAGE }}"
-          ls -lh "${{ env.FIRMWARE_PACKAGE }}" artifact/firmware.bin
-
-      - name: Upload whole firmware.zip artifact
+      - name: Upload firmware artifact
         uses: actions/upload-artifact@v4
         with:
-          name: firmware.zip
-          path: firmware.zip
-          retention-days: 14
-          if-no-files-found: error
-
-      - name: Upload standalone firmware.bin artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: firmware.bin
-          path: artifact/firmware.bin
+          name: ${{ env.ARTIFACT_NAME }}
+          path: artifact
           retention-days: 14
           if-no-files-found: error
 
@@ -221,16 +203,11 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download firmware package artifact
+      - name: Download firmware artifact
         uses: actions/download-artifact@v4
         with:
-          name: firmware.zip
-          path: artifact-package
-
-      - name: Extract firmware.zip
-        run: |
-          set -e
-          unzip -q artifact-package/firmware.zip -d artifact
+          name: ${{ env.ARTIFACT_NAME }}
+          path: artifact
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
@@ -267,33 +244,3 @@ jobs:
           generate_release_notes: true
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-  feature_firmware:
-    needs: build
-    runs-on: ubuntu-24.04
-    if: github.ref == 'refs/heads/feature/ui-highlight-slider-refinement'
-    permissions:
-      contents: write
-    timeout-minutes: 10
-
-    steps:
-      - name: Download standalone firmware.bin artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: firmware.bin
-          path: artifact
-
-      - name: Publish standalone firmware.bin
-        uses: softprops/action-gh-release@v3
-        with:
-          tag_name: feature-ui-latest
-          target_commitish: ${{ github.sha }}
-          name: C3 Music feature build
-          body: |
-            Latest standalone OTA firmware from `feature/ui-highlight-slider-refinement`.
-
-            This is the application-only `firmware.bin` for browser OTA.
-          prerelease: true
-          make_latest: false
-          overwrite_files: true
-          files: artifact/firmware.bin
