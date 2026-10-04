@@ -3,7 +3,7 @@
   ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
   TCP PCM (50005) primary, HTTP WAV (8080) fallback
   Dual-Mode: Direct Push Server (c3music.local:50005) + Outbound Client
-  Supports: 16-bit/24-bit @ 44.1kHz / 48kHz
+  Supports: 16-bit / 24-bit @ 44.1kHz / 48kHz
   OLED: SDA 5, SCL 6
   I2S: BCLK 3, LRCLK 1, DOUT 10
 */
@@ -26,7 +26,7 @@ static const char PHONE_HOST[] = "192.168.254.119";
 
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3music";
-static const char FIRMWARE_VERSION[] = "1.1.0";
+static const char FIRMWARE_VERSION[] = "1.3.0";
 
 static constexpr uint8_t OLED_SDA = 5;
 static constexpr uint8_t OLED_SCL = 6;
@@ -47,7 +47,6 @@ static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 16;
 static constexpr size_t AUDIO_RING_BYTES = 65536;
 static constexpr size_t NETWORK_READ_BYTES = 1460;
 static constexpr size_t I2S_WRITE_BYTES = 2048;
-static constexpr uint32_t PREBUFFER_BYTES = 12000;
 static constexpr uint32_t STREAM_RETRY_MS = 2500;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
 static constexpr uint32_t OLED_REFRESH_MS = 650;
@@ -374,7 +373,7 @@ static uint32_t targetPrebufferBytes() {
       (uint64_t)DEFAULT_SAMPLE_RATE * DEFAULT_CHANNELS * (DEFAULT_BITS_PER_SAMPLE / 8);
   uint64_t bytes = (bytesPerSecond * settings.targetBufferMs) / 1000ULL;
   if (bytes < 4096) bytes = 4096;
-  if (bytes > 24576) bytes = 24576;
+  if (bytes > 32768) bytes = 32768;
   return (uint32_t)bytes;
 }
 
@@ -390,7 +389,8 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
   if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
 
-  i2s_bits_per_sample_t bps = (bits == 24) ? I2S_BITS_PER_SAMPLE_24BIT : I2S_BITS_PER_SAMPLE_16BIT;
+  // 24-bit audio is clocked out in 32-bit slots on I2S for standard DACs (UDA1334A)
+  i2s_bits_per_sample_t bps = (bits == 24) ? I2S_BITS_PER_SAMPLE_32BIT : I2S_BITS_PER_SAMPLE_16BIT;
 
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
@@ -428,7 +428,10 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   i2sReady = true;
   if (i2sMux) xSemaphoreGive(i2sMux);
 
-  Serial.printf("[I2S] %lu Hz, %u-bit, %s, BCLK=%d WS=%d DOUT=%d\n", (unsigned long)sr, bits, ch==2?"Stereo":"Mono", I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  Serial.printf("[I2S] %lu Hz, %u-bit, %s (I2S slot: %s), BCLK=%d WS=%d DOUT=%d\n",
+                (unsigned long)sr, bits, ch==2?"Stereo":"Mono",
+                bits==24?"32-bit slot":"16-bit slot",
+                I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   return true;
 }
 
@@ -501,12 +504,10 @@ static bool parseWavHeader(StreamFormat &f) {
 
 static bool connectRawTcp() {
   setReceiverState(RX_CONNECTING);
-  streamFormat.sampleRate=DEFAULT_SAMPLE_RATE; streamFormat.channels=DEFAULT_CHANNELS; streamFormat.bitsPerSample=DEFAULT_BITS_PER_SAMPLE; streamFormat.audioFormat=1; streamFormat.valid=true;
   Serial.printf("[TCP] Connecting to %s:%u\n",settings.phoneHost.c_str(),settings.tcpPort);
   if (!connectStreamHost(settings.tcpPort)){ stats.lastError="TCP host unavailable"; return false; }
   streamClient.setNoDelay(true);
   streamClient.setTimeout(3);
-  if (!beginI2S(streamFormat.sampleRate,streamFormat.channels,streamFormat.bitsPerSample)){ stats.lastError="I2S setup failed"; streamClient.stop(); return false; }
   return true;
 }
 
@@ -525,15 +526,15 @@ static bool connectHttpWav() {
   return true;
 }
 
-// Static buffers: ZERO stack memory consumption
+// STATIC BUFFERS IN RAM (0 stack usage = no FreeRTOS stack overflow crash)
 static uint8_t playbackIn[I2S_WRITE_BYTES / 2];
-static uint8_t playbackOut[I2S_WRITE_BYTES];
+static uint8_t playbackOut[I2S_WRITE_BYTES * 2];
 
 static void playbackTask(void*) {
   for(;;){
     if (!i2sReady||!bufferStarted){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
-    size_t want = sizeof(playbackIn);
+    const size_t want = sizeof(playbackIn);
     size_t n = ringRead(playbackIn, want);
     if (n==0){
       stats.underruns++;
@@ -544,43 +545,120 @@ static void playbackTask(void*) {
 
     const uint8_t *writeBuf = playbackIn;
     size_t writeLen = n;
+    const uint8_t volume = settings.volumePercent;
 
-    uint8_t volume = settings.volumePercent;
-    if (volume < 100) {
-      if (streamFormat.bitsPerSample == 16) {
-        int16_t *samples = reinterpret_cast<int16_t*>(playbackIn);
-        size_t sampleCount = n / sizeof(int16_t);
+    if (streamFormat.bitsPerSample == 16) {
+      // 16-bit processing
+      int16_t *samples = reinterpret_cast<int16_t*>(playbackIn);
+      size_t sampleCount = n / sizeof(int16_t);
+      if (volume < 100) {
         for (size_t i = 0; i < sampleCount; ++i) {
           samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
         }
       }
-    }
 
-    if (streamFormat.channels==1) {
-      if (streamFormat.bitsPerSample == 16) {
-        size_t samples = n / 2;
-        int16_t *src = reinterpret_cast<int16_t*>(playbackIn);
+      if (streamFormat.channels == 1) {
         int16_t *dst = reinterpret_cast<int16_t*>(playbackOut);
-        for (size_t i=0;i<samples;i++) { dst[i*2]=src[i]; dst[i*2+1]=src[i]; }
+        for (size_t i = 0; i < sampleCount; ++i) {
+          dst[i * 2]     = samples[i];
+          dst[i * 2 + 1] = samples[i];
+        }
         writeBuf = playbackOut;
-        writeLen = samples * 4;
+        writeLen = sampleCount * 4;
+      }
+    } 
+    else if (streamFormat.bitsPerSample == 24) {
+      // 24-bit PCM: expand packed 3-byte samples into 32-bit slot for UDA1334A DAC
+      size_t sampleCount = n / 3;
+      int32_t *dst32 = reinterpret_cast<int32_t*>(playbackOut);
+
+      if (streamFormat.channels == 1) {
+        for (size_t i = 0; i < sampleCount; ++i) {
+          size_t idx = i * 3;
+          int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
+                               ((uint32_t)playbackIn[idx+1] << 8) | 
+                               ((uint32_t)playbackIn[idx+2] << 16));
+          if (s & 0x00800000) s |= 0xFF000000;
+          if (volume < 100) s = (s * volume) / 100;
+          int32_t slot = s << 8; // left-aligned MSB
+          dst32[i * 2]     = slot;
+          dst32[i * 2 + 1] = slot;
+        }
+        writeBuf = playbackOut;
+        writeLen = sampleCount * 8;
+      } else {
+        for (size_t i = 0; i < sampleCount; ++i) {
+          size_t idx = i * 3;
+          int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
+                               ((uint32_t)playbackIn[idx+1] << 8) | 
+                               ((uint32_t)playbackIn[idx+2] << 16));
+          if (s & 0x00800000) s |= 0xFF000000;
+          if (volume < 100) s = (s * volume) / 100;
+          dst32[i] = s << 8; // left-aligned MSB
+        }
+        writeBuf = playbackOut;
+        writeLen = sampleCount * 4;
       }
     }
 
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
     bool ready = i2sReady;
-    size_t w=0;
-    esp_err_t r = ready ? i2s_write(I2S_NUM_0,writeBuf,writeLen,&w,pdMS_TO_TICKS(40)) : ESP_FAIL;
+    size_t w = 0;
+    esp_err_t r = ready ? i2s_write(I2S_NUM_0, writeBuf, writeLen, &w, pdMS_TO_TICKS(40)) : ESP_FAIL;
     if (i2sMux) xSemaphoreGive(i2sMux);
 
-    if (r==ESP_OK && w>0) stats.bytesPlayed += (streamFormat.channels==1) ? (w/2) : w;
+    if (r == ESP_OK && w > 0) stats.bytesPlayed += n;
     else vTaskDelay(pdMS_TO_TICKS(2));
   }
+}
+
+// Safely inspects connection format and applies matching I2S clock
+static void detectAndApplyFormat(WiFiClient &c) {
+  uint32_t startWait = millis();
+  while (c.connected() && c.available() < 16 && (millis() - startWait < 400)) {
+    delay(2);
+  }
+
+  uint32_t sr = DEFAULT_SAMPLE_RATE;
+  uint16_t ch = DEFAULT_CHANNELS;
+  uint16_t bits = DEFAULT_BITS_PER_SAMPLE;
+
+  if (c.available() >= 16) {
+    uint8_t hdr[16];
+    size_t got = c.readBytes(hdr, 16);
+    if (got == 16) {
+      if (hdr[0] == 'C' && hdr[1] == '3' && hdr[2] == 'M' && hdr[3] == 'S') {
+        bits = hdr[5];
+        ch   = hdr[6];
+        sr   = (uint32_t)hdr[8] | ((uint32_t)hdr[9] << 8) | ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
+        Serial.printf("[C3MS HEADER] Detected: %lu Hz, %u-bit, %u ch\n", (unsigned long)sr, bits, ch);
+      } else {
+        // Raw PCM audio: write these 16 bytes straight to buffer so 0 audio is lost
+        ringWrite(hdr, 16);
+        stats.bytesReceived += 16;
+      }
+    }
+  }
+
+  if (sr < 8000 || sr > 96000) sr = DEFAULT_SAMPLE_RATE;
+  if (bits != 16 && bits != 24) bits = DEFAULT_BITS_PER_SAMPLE;
+  if (ch != 1 && ch != 2) ch = DEFAULT_CHANNELS;
+
+  streamFormat.sampleRate = sr;
+  streamFormat.channels = ch;
+  streamFormat.bitsPerSample = bits;
+  streamFormat.audioFormat = 1;
+  streamFormat.valid = true;
+
+  beginI2S(sr, ch, bits);
 }
 
 static void runConnectedStream() {
   uint8_t in[NETWORK_READ_BYTES];
   stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
+
+  // Auto-detect format on connection
+  detectAndApplyFormat(streamClient);
 
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
     int av=streamClient.available();
@@ -635,7 +713,7 @@ static void streamTask(void*) {
       continue;
     }
 
-    // Direct Push check: did phone push audio directly to c3music.local:50005?
+    // Direct Push check
     if (tcpPushServerStarted) {
       WiFiClient pushedClient = tcpPushServer.available();
       if (pushedClient) {
@@ -647,13 +725,6 @@ static void streamTask(void*) {
         if (streamClientMux) xSemaphoreGive(streamClientMux);
 
         Serial.printf("[PUSH SERVER] Phone connected directly from %s!\n", streamClient.remoteIP().toString().c_str());
-        streamFormat.sampleRate = DEFAULT_SAMPLE_RATE;
-        streamFormat.channels = DEFAULT_CHANNELS;
-        streamFormat.bitsPerSample = DEFAULT_BITS_PER_SAMPLE;
-        streamFormat.audioFormat = 1;
-        streamFormat.valid = true;
-        beginI2S(streamFormat.sampleRate, streamFormat.channels, streamFormat.bitsPerSample);
-
         stats.reconnects++;
         runConnectedStream();
 
@@ -663,7 +734,7 @@ static void streamTask(void*) {
       }
     }
 
-    // Outbound Connection: connects to configured phoneHost if push wasn't used
+    // Outbound Client
     if (millis()-lastStreamAttemptMs<STREAM_RETRY_MS){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
     lastStreamAttemptMs=millis();
     bool ok=false; StreamMode tr=settings.preferredMode;
@@ -940,7 +1011,9 @@ void setup(){
   displayBegin(); setReceiverState(RX_BOOTING);
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setAutoReconnect(true);
   setupWebServer();
-  BaseType_t ok1=xTaskCreate(playbackTask,"i2sPlayback",4096,nullptr,3,&playbackTaskHandle);
+
+  // 8192 byte stack: plenty of room, zero risk of stack overflow!
+  BaseType_t ok1=xTaskCreate(playbackTask,"i2sPlayback",8192,nullptr,3,&playbackTaskHandle);
   BaseType_t ok2=xTaskCreate(streamTask,"pcmStream",6144,nullptr,2,&streamTaskHandle);
   if (ok1!=pdPASS||ok2!=pdPASS) setReceiverState(RX_ERROR,"Task creation failed");
   connectWifiIfNeeded(); displayUpdate();
