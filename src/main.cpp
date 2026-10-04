@@ -41,6 +41,9 @@ static constexpr uint16_t HTTP_DEFAULT_PORT = 8080;
 static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
 static constexpr uint8_t DEFAULT_CHANNELS = 2;
 static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 16;
+static constexpr uint8_t C3_PROTOCOL_VERSION = 1;
+static constexpr size_t C3_FORMAT_HEADER_BYTES = 16;
+static constexpr uint32_t TCP_FORMAT_HEADER_TIMEOUT_MS = 250;
 
 static constexpr size_t AUDIO_RING_BYTES = 65536;
 static constexpr size_t NETWORK_READ_BYTES = 1460;
@@ -98,6 +101,8 @@ static volatile bool stopRequested = false;
 static volatile bool i2sReady = false;
 static volatile bool bufferStarted = false;
 static uint8_t audioRing[AUDIO_RING_BYTES];
+static uint8_t tcpPrefetch[C3_FORMAT_HEADER_BYTES];
+static size_t tcpPrefetchLen = 0;
 static volatile size_t ringReadIndex = 0, ringWriteIndex = 0, ringCount = 0;
 static portMUX_TYPE ringMux = portMUX_INITIALIZER_UNLOCKED;
 static SemaphoreHandle_t audioDataSemaphore = nullptr;
@@ -333,7 +338,7 @@ static void beginMdnsIfNeeded() {
 }
 
 static bool supportedPcmFormat(const StreamFormat &f) {
-  return f.audioFormat==1 && f.bitsPerSample==16 && (f.channels==1||f.channels==2) && f.sampleRate>=8000 && f.sampleRate<=96000;
+  return f.audioFormat==1 && (f.bitsPerSample==16 || f.bitsPerSample==24) && (f.channels==1||f.channels==2) && f.sampleRate>=8000 && f.sampleRate<=96000;
 }
 
 static void endI2S() {
@@ -362,16 +367,18 @@ static void stopStreamClient() {
 }
 
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
-  if (bits!=16 || (ch!=1 && ch!=2)) return false;
+  if ((bits!=16 && bits!=24) || (ch!=1 && ch!=2)) return false;
   
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
   if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
 
   // Fixed I2S configuration for ESP32-C3 & UDA1334A DAC
+  i2s_bits_per_sample_t bps = (bits == 24) ? I2S_BITS_PER_SAMPLE_32BIT : I2S_BITS_PER_SAMPLE_16BIT;
+
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
     .sample_rate = sr,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .bits_per_sample = bps,
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
@@ -475,13 +482,76 @@ static bool parseWavHeader(StreamFormat &f) {
   return true;
 }
 
+static bool readTcpFormatHeader() {
+  tcpPrefetchLen = 0;
+  uint8_t header[C3_FORMAT_HEADER_BYTES];
+
+  if (!readExact(streamClient, header, 4, TCP_FORMAT_HEADER_TIMEOUT_MS)) {
+    stats.lastError = "TCP format header timeout";
+    return false;
+  }
+
+  if (memcmp(header, "C3MS", 4) != 0) {
+    memcpy(tcpPrefetch, header, 4);
+    tcpPrefetchLen = 4;
+    streamFormat.sampleRate = DEFAULT_SAMPLE_RATE;
+    streamFormat.channels = DEFAULT_CHANNELS;
+    streamFormat.bitsPerSample = DEFAULT_BITS_PER_SAMPLE;
+    streamFormat.audioFormat = 1;
+    streamFormat.valid = true;
+    Serial.println("[TCP] Legacy raw PCM detected (no C3MS header)");
+    return true;
+  }
+
+  if (!readExact(streamClient, header + 4, C3_FORMAT_HEADER_BYTES - 4, TCP_FORMAT_HEADER_TIMEOUT_MS)) {
+    stats.lastError = "TCP C3MS header incomplete";
+    return false;
+  }
+
+  const uint8_t version = header[4];
+  const uint16_t bits = header[5];
+  const uint16_t channels = header[6];
+  const uint32_t sampleRate = readLe32(header + 8);
+  const uint32_t frameSize = readLe32(header + 12);
+  const uint32_t expectedFrameSize = (uint32_t)channels * (uint32_t)(bits / 8);
+
+  if (version == C3_PROTOCOL_VERSION &&
+      (bits == 16 || bits == 24) &&
+      (channels == 1 || channels == 2) &&
+      sampleRate >= 8000 && sampleRate <= 96000 &&
+      frameSize == expectedFrameSize &&
+      expectedFrameSize > 0) {
+    streamFormat.sampleRate = sampleRate;
+    streamFormat.channels = channels;
+    streamFormat.bitsPerSample = bits;
+    streamFormat.audioFormat = 1;
+    streamFormat.valid = true;
+    Serial.printf("[TCP] C3MS v%u: %lu Hz, %u-bit, %s, frame=%lu\n",
+                  version, (unsigned long)sampleRate, bits,
+                  channels == 2 ? "Stereo" : "Mono",
+                  (unsigned long)frameSize);
+    return true;
+  }
+
+  memcpy(tcpPrefetch, header, C3_FORMAT_HEADER_BYTES);
+  tcpPrefetchLen = C3_FORMAT_HEADER_BYTES;
+  streamFormat.sampleRate = DEFAULT_SAMPLE_RATE;
+  streamFormat.channels = DEFAULT_CHANNELS;
+  streamFormat.bitsPerSample = DEFAULT_BITS_PER_SAMPLE;
+  streamFormat.audioFormat = 1;
+  streamFormat.valid = true;
+  Serial.println("[TCP] Invalid C3MS header; treating bytes as legacy raw PCM");
+  return true;
+}
+
 static bool connectRawTcp() {
   setReceiverState(RX_CONNECTING);
-  streamFormat.sampleRate=DEFAULT_SAMPLE_RATE; streamFormat.channels=DEFAULT_CHANNELS; streamFormat.bitsPerSample=DEFAULT_BITS_PER_SAMPLE; streamFormat.audioFormat=1; streamFormat.valid=true;
+  streamFormat.sampleRate=0; streamFormat.channels=0; streamFormat.bitsPerSample=0; streamFormat.audioFormat=1; streamFormat.valid=false;
   Serial.printf("[TCP] Connecting to %s:%u\n",settings.phoneHost.c_str(),settings.tcpPort);
   if (!connectStreamHost(settings.tcpPort)){ stats.lastError="TCP host unavailable"; return false; }
   streamClient.setNoDelay(true);
-  streamClient.setTimeout(3); // 3 seconds timeout
+  streamClient.setTimeout(3);
+  if (!readTcpFormatHeader()) { streamClient.stop(); return false; }
   if (!beginI2S(streamFormat.sampleRate,streamFormat.channels,streamFormat.bitsPerSample)){ stats.lastError="I2S setup failed"; streamClient.stop(); return false; }
   return true;
 }
@@ -502,9 +572,12 @@ static bool connectHttpWav() {
   return true;
 }
 
+static uint8_t playbackIn[I2S_WRITE_BYTES * 2];
+static uint8_t playbackOut[I2S_WRITE_BYTES * 2];
+
 static void playbackTask(void*) {
-  uint8_t in[I2S_WRITE_BYTES / 2];
-  uint8_t out[I2S_WRITE_BYTES];
+  uint8_t *in = playbackIn;
+  uint8_t *out = playbackOut;
   for(;;){
     if (!i2sReady||!bufferStarted){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
 
@@ -519,8 +592,21 @@ static void playbackTask(void*) {
 
     const uint8_t *writeBuf = in;
     size_t writeLen = n;
-    // If incoming stream is mono (1 channel), duplicate into Left and Right stereo
-    if (streamFormat.channels==1) {
+
+    if (streamFormat.bitsPerSample == 24) {
+      size_t count = n / 3;
+      int32_t *dst32 = reinterpret_cast<int32_t*>(out);
+      for (size_t i = 0; i < count; ++i) {
+        size_t idx = i * 3;
+        int32_t sample = (int32_t)((uint32_t)in[idx] |
+                                   ((uint32_t)in[idx + 1] << 8) |
+                                   ((uint32_t)in[idx + 2] << 16));
+        if (sample & 0x00800000) sample |= 0xFF000000;
+        dst32[i] = sample << 8;
+      }
+      writeBuf = out;
+      writeLen = count * 4;
+    } else if (streamFormat.channels==1) {
       size_t samples = n / 2;
       int16_t *src = reinterpret_cast<int16_t*>(in);
       int16_t *dst = reinterpret_cast<int16_t*>(out);
@@ -542,6 +628,10 @@ static void playbackTask(void*) {
 
 static void runConnectedStream() {
   uint8_t in[NETWORK_READ_BYTES];
+  if (tcpPrefetchLen > 0) {
+    ringWrite(tcpPrefetch, tcpPrefetchLen);
+    tcpPrefetchLen = 0;
+  }
   stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
     int av=streamClient.available();
@@ -645,9 +735,10 @@ static String makeStatusJson(){
   r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
-  r+="\"sampleRate\":"+String(streamFormat.sampleRate)+",";
-  r+="\"channels\":"+String(streamFormat.channels)+",";
-  r+="\"bits\":"+String(streamFormat.bitsPerSample)+",";
+  r+="\"formatValid\":"+String(streamFormat.valid?"true":"false")+",";
+  r+="\"sampleRate\":"+String(streamFormat.valid?streamFormat.sampleRate:0)+",");
+  r+="\"channels\":"+String(streamFormat.valid?streamFormat.channels:0)+",";
+  r+="\"bits\":"+String(streamFormat.valid?streamFormat.bitsPerSample:0)+",";
   r+="\"bufferBytes\":"+String((uint32_t)ringSize())+",";
   r+="\"bufferPercent\":"+String(ringPercent())+",";
   r+="\"bytesReceived\":"+String(stats.bytesReceived)+",";
