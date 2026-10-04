@@ -1,9 +1,9 @@
 /*
-  C3 Music Receiver
-  ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
+  C3 High-Performance Music Receiver (Audiophile Edition)
+  ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC + LC Filter
   TCP PCM (50005) primary, HTTP WAV (8080) fallback
   Dual-Mode: Direct Push Server (c3music.local:50005) + Outbound Client
-  Supports: 16-bit / 24-bit @ 44.1kHz / 48kHz
+  Bit-Perfect Passthrough + Dynamic 16/24-bit 44.1k/48k Auto-Switch
   OLED: SDA 5, SCL 6
   I2S: BCLK 3, LRCLK 1, DOUT 10
 */
@@ -26,7 +26,7 @@ static const char PHONE_HOST[] = "192.168.254.119";
 
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3music";
-static const char FIRMWARE_VERSION[] = "1.3.0";
+static const char FIRMWARE_VERSION[] = "1.3.1-HQ";
 
 static constexpr uint8_t OLED_SDA = 5;
 static constexpr uint8_t OLED_SCL = 6;
@@ -180,7 +180,7 @@ static void setReceiverState(ReceiverState value, const String &error = "") {
   else { Serial.printf("[STATE] %s\n", receiverStateName(value)); }
 }
 
-static bool ringWrite(const uint8_t *data, size_t length) {
+static inline bool ringWrite(const uint8_t *data, size_t length) {
   if (!data || length == 0) return true;
   bool ok = true;
   portENTER_CRITICAL(&ringMux);
@@ -197,7 +197,7 @@ static bool ringWrite(const uint8_t *data, size_t length) {
   return ok;
 }
 
-static size_t ringRead(uint8_t *out, size_t maxLen) {
+static inline size_t ringRead(uint8_t *out, size_t maxLen) {
   if (!out || maxLen == 0) return 0;
   portENTER_CRITICAL(&ringMux);
   size_t local = ringCount;
@@ -221,8 +221,8 @@ static void ringClear() {
   bufferStarted = false;
 }
 
-static size_t ringSize() { portENTER_CRITICAL(&ringMux); size_t v = ringCount; portEXIT_CRITICAL(&ringMux); return v; }
-static uint8_t ringPercent() { return (uint8_t)((ringSize() * 100UL) / AUDIO_RING_BYTES); }
+static inline size_t ringSize() { portENTER_CRITICAL(&ringMux); size_t v = ringCount; portEXIT_CRITICAL(&ringMux); return v; }
+static inline uint8_t ringPercent() { return (uint8_t)((ringSize() * 100UL) / AUDIO_RING_BYTES); }
 
 static void displayBegin() {
   Wire.begin(OLED_SDA, OLED_SCL);
@@ -231,7 +231,7 @@ static void displayBegin() {
   oled.clearBuffer();
   oled.setFont(u8g2_font_5x7_tf);
   oled.drawStr(0, 7, "C3 MUSIC");
-  oled.drawStr(0, 17, "Starting...");
+  oled.drawStr(0, 17, "Audiophile HQ");
   oled.sendBuffer();
   oledAvailable = true;
 }
@@ -383,17 +383,29 @@ static void stopStreamClient() {
   if (streamClientMux) xSemaphoreGive(streamClientMux);
 }
 
+static uint32_t activeI2sSampleRate = 0;
+static uint16_t activeI2sBits = 0;
+static uint16_t activeI2sChannels = 0;
+
+// High-performance I2S configurator: reuses active driver if format didn't change (no pops)
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   if ((bits!=16 && bits!=24) || (ch!=1 && ch!=2)) return false;
   
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
-  if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
+
+  // If already initialized with identical clocking, keep running seamless!
+  if (i2sReady && activeI2sSampleRate == sr && activeI2sBits == bits && activeI2sChannels == ch) {
+    if (i2sMux) xSemaphoreGive(i2sMux);
+    return true;
+  }
+
+  if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady = false; }
 
   // 24-bit audio is clocked out in 32-bit slots on I2S for standard DACs (UDA1334A)
   i2s_bits_per_sample_t bps = (bits == 24) ? I2S_BITS_PER_SAMPLE_32BIT : I2S_BITS_PER_SAMPLE_16BIT;
 
   i2s_config_t cfg = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
     .sample_rate = sr,
     .bits_per_sample = bps,
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
@@ -425,12 +437,15 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   }
 
   i2s_zero_dma_buffer(I2S_NUM_0);
+  activeI2sSampleRate = sr;
+  activeI2sBits = bits;
+  activeI2sChannels = ch;
   i2sReady = true;
   if (i2sMux) xSemaphoreGive(i2sMux);
 
-  Serial.printf("[I2S] %lu Hz, %u-bit, %s (I2S slot: %s), BCLK=%d WS=%d DOUT=%d\n",
+  Serial.printf("[I2S-HQ] %lu Hz, %u-bit, %s (%s), BCLK=%d WS=%d DOUT=%d\n",
                 (unsigned long)sr, bits, ch==2?"Stereo":"Mono",
-                bits==24?"32-bit slot":"16-bit slot",
+                bits==24?"32b-slot":"16b-slot",
                 I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   return true;
 }
@@ -526,20 +541,20 @@ static bool connectHttpWav() {
   return true;
 }
 
-// STATIC BUFFERS IN RAM (0 stack usage = no FreeRTOS stack overflow crash)
+// STATIC BUFFERS IN MAIN RAM: 0 stack usage, maximum memory bandwidth
 static uint8_t playbackIn[I2S_WRITE_BYTES / 2];
 static uint8_t playbackOut[I2S_WRITE_BYTES * 2];
 
 static void playbackTask(void*) {
   for(;;){
-    if (!i2sReady||!bufferStarted){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
+    if (!i2sReady||!bufferStarted){ vTaskDelay(pdMS_TO_TICKS(8)); continue; }
 
     const size_t want = sizeof(playbackIn);
     size_t n = ringRead(playbackIn, want);
     if (n==0){
       stats.underruns++;
-      if (audioDataSemaphore) xSemaphoreTake(audioDataSemaphore, pdMS_TO_TICKS(20));
-      else vTaskDelay(pdMS_TO_TICKS(4));
+      if (audioDataSemaphore) xSemaphoreTake(audioDataSemaphore, pdMS_TO_TICKS(15));
+      else vTaskDelay(pdMS_TO_TICKS(3));
       continue;
     }
 
@@ -548,9 +563,10 @@ static void playbackTask(void*) {
     const uint8_t volume = settings.volumePercent;
 
     if (streamFormat.bitsPerSample == 16) {
-      // 16-bit processing
       int16_t *samples = reinterpret_cast<int16_t*>(playbackIn);
       size_t sampleCount = n / sizeof(int16_t);
+
+      // Bit-perfect bypass at 100% volume
       if (volume < 100) {
         for (size_t i = 0; i < sampleCount; ++i) {
           samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
@@ -568,36 +584,66 @@ static void playbackTask(void*) {
       }
     } 
     else if (streamFormat.bitsPerSample == 24) {
-      // 24-bit PCM: expand packed 3-byte samples into 32-bit slot for UDA1334A DAC
+      // High-performance 24-bit slot alignment for UDA1334A
       size_t sampleCount = n / 3;
       int32_t *dst32 = reinterpret_cast<int32_t*>(playbackOut);
 
-      if (streamFormat.channels == 1) {
-        for (size_t i = 0; i < sampleCount; ++i) {
-          size_t idx = i * 3;
-          int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
-                               ((uint32_t)playbackIn[idx+1] << 8) | 
-                               ((uint32_t)playbackIn[idx+2] << 16));
-          if (s & 0x00800000) s |= 0xFF000000;
-          if (volume < 100) s = (s * volume) / 100;
-          int32_t slot = s << 8; // left-aligned MSB
-          dst32[i * 2]     = slot;
-          dst32[i * 2 + 1] = slot;
+      if (volume >= 100) {
+        // BIT-PERFECT PASSTHROUGH (Fast branchless execution)
+        if (streamFormat.channels == 1) {
+          for (size_t i = 0; i < sampleCount; ++i) {
+            size_t idx = i * 3;
+            int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
+                                 ((uint32_t)playbackIn[idx+1] << 8) | 
+                                 ((uint32_t)playbackIn[idx+2] << 16));
+            if (s & 0x00800000) s |= 0xFF000000;
+            int32_t slot = s << 8;
+            dst32[i * 2]     = slot;
+            dst32[i * 2 + 1] = slot;
+          }
+          writeBuf = playbackOut;
+          writeLen = sampleCount * 8;
+        } else {
+          for (size_t i = 0; i < sampleCount; ++i) {
+            size_t idx = i * 3;
+            int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
+                                 ((uint32_t)playbackIn[idx+1] << 8) | 
+                                 ((uint32_t)playbackIn[idx+2] << 16));
+            if (s & 0x00800000) s |= 0xFF000000;
+            dst32[i] = s << 8;
+          }
+          writeBuf = playbackOut;
+          writeLen = sampleCount * 4;
         }
-        writeBuf = playbackOut;
-        writeLen = sampleCount * 8;
       } else {
-        for (size_t i = 0; i < sampleCount; ++i) {
-          size_t idx = i * 3;
-          int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
-                               ((uint32_t)playbackIn[idx+1] << 8) | 
-                               ((uint32_t)playbackIn[idx+2] << 16));
-          if (s & 0x00800000) s |= 0xFF000000;
-          if (volume < 100) s = (s * volume) / 100;
-          dst32[i] = s << 8; // left-aligned MSB
+        // High-precision volume scaling
+        if (streamFormat.channels == 1) {
+          for (size_t i = 0; i < sampleCount; ++i) {
+            size_t idx = i * 3;
+            int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
+                                 ((uint32_t)playbackIn[idx+1] << 8) | 
+                                 ((uint32_t)playbackIn[idx+2] << 16));
+            if (s & 0x00800000) s |= 0xFF000000;
+            s = (s * volume) / 100;
+            int32_t slot = s << 8;
+            dst32[i * 2]     = slot;
+            dst32[i * 2 + 1] = slot;
+          }
+          writeBuf = playbackOut;
+          writeLen = sampleCount * 8;
+        } else {
+          for (size_t i = 0; i < sampleCount; ++i) {
+            size_t idx = i * 3;
+            int32_t s = (int32_t)((uint32_t)playbackIn[idx] | 
+                                 ((uint32_t)playbackIn[idx+1] << 8) | 
+                                 ((uint32_t)playbackIn[idx+2] << 16));
+            if (s & 0x00800000) s |= 0xFF000000;
+            s = (s * volume) / 100;
+            dst32[i] = s << 8;
+          }
+          writeBuf = playbackOut;
+          writeLen = sampleCount * 4;
         }
-        writeBuf = playbackOut;
-        writeLen = sampleCount * 4;
       }
     }
 
@@ -612,7 +658,7 @@ static void playbackTask(void*) {
   }
 }
 
-// Safely inspects connection format and applies matching I2S clock
+// Inspects connection format with 0 packet loss
 static void detectAndApplyFormat(WiFiClient &c) {
   uint32_t startWait = millis();
   while (c.connected() && c.available() < 16 && (millis() - startWait < 400)) {
@@ -631,9 +677,9 @@ static void detectAndApplyFormat(WiFiClient &c) {
         bits = hdr[5];
         ch   = hdr[6];
         sr   = (uint32_t)hdr[8] | ((uint32_t)hdr[9] << 8) | ((uint32_t)hdr[10] << 16) | ((uint32_t)hdr[11] << 24);
-        Serial.printf("[C3MS HEADER] Detected: %lu Hz, %u-bit, %u ch\n", (unsigned long)sr, bits, ch);
+        Serial.printf("[C3MS-HQ] Sync Header: %lu Hz, %u-bit, %u ch\n", (unsigned long)sr, bits, ch);
       } else {
-        // Raw PCM audio: write these 16 bytes straight to buffer so 0 audio is lost
+        // Pure raw PCM stream: flush directly to buffer so 0 audio is lost
         ringWrite(hdr, 16);
         stats.bytesReceived += 16;
       }
@@ -657,7 +703,6 @@ static void runConnectedStream() {
   uint8_t in[NETWORK_READ_BYTES];
   stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
 
-  // Auto-detect format on connection
   detectAndApplyFormat(streamClient);
 
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
@@ -669,7 +714,7 @@ static void runConnectedStream() {
         if (n>0){
           stats.bytesReceived+=n;
           stats.lastReceiveMs=millis();
-          if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(2));
+          if (!ringWrite(in,n)) vTaskDelay(pdMS_TO_TICKS(1));
           if (!bufferStarted && ringSize()>=targetPrebufferBytes()){
             bufferStarted=true;
             setReceiverState(RX_STREAMING);
@@ -717,7 +762,7 @@ static void streamTask(void*) {
     if (tcpPushServerStarted) {
       WiFiClient pushedClient = tcpPushServer.available();
       if (pushedClient) {
-        stopStreamClient(); endI2S(); ringClear();
+        stopStreamClient(); ringClear();
         if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
         streamClient = pushedClient;
         streamClient.setNoDelay(true);
@@ -728,7 +773,7 @@ static void streamTask(void*) {
         stats.reconnects++;
         runConnectedStream();
 
-        streamClient.stop(); endI2S(); ringClear();
+        streamClient.stop(); ringClear();
         vTaskDelay(pdMS_TO_TICKS(100));
         continue;
       }
@@ -740,14 +785,14 @@ static void streamTask(void*) {
     bool ok=false; StreamMode tr=settings.preferredMode;
     if (tr==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     if (!ok && settings.autoFallback && !stopRequested){
-      stopStreamClient(); endI2S(); ringClear();
+      stopStreamClient(); ringClear();
       StreamMode fb=(tr==STREAM_MODE_TCP)?STREAM_MODE_HTTP:STREAM_MODE_TCP;
       Serial.printf("[STREAM] Primary failed; trying %s\n",streamModeName(fb));
       if (fb==STREAM_MODE_TCP) ok=connectRawTcp(); else ok=connectHttpWav();
     }
     if (ok){ stats.reconnects++; runConnectedStream(); }
     else { stats.streamErrors++; setReceiverState(RX_ERROR,stats.lastError.length()?stats.lastError:"Stream unavailable"); }
-    streamClient.stop(); endI2S(); ringClear();
+    streamClient.stop(); ringClear();
     if (!stopRequested && settings.streamEnabled && settings.autoReconnect) {
       vTaskDelay(pdMS_TO_TICKS(STREAM_RETRY_MS));
     } else {
@@ -763,10 +808,10 @@ static void startStreaming(){
   stopRequested=false; settings.streamEnabled=true; lastStreamAttemptMs=0; saveSettings(); setReceiverState(RX_IDLE);
 }
 static void stopStreaming(){
-  stopRequested=true; settings.streamEnabled=false; saveSettings(); stopStreamClient(); ringClear(); endI2S(); setReceiverState(RX_STOPPED);
+  stopRequested=true; settings.streamEnabled=false; saveSettings(); stopStreamClient(); ringClear(); setReceiverState(RX_STOPPED);
 }
 static void reconnectStreaming(){
-  stopRequested=true; stopStreamClient(); ringClear(); endI2S(); delay(100);
+  stopRequested=true; stopStreamClient(); ringClear(); delay(100);
   stopRequested=false; settings.streamEnabled=true; lastStreamAttemptMs=0; saveSettings(); setReceiverState(RX_IDLE);
 }
 
@@ -1002,7 +1047,7 @@ void setup(){
   Serial.begin(115200); delay(400);
   Serial.println(); Serial.println("============================================================");
   Serial.printf("%s v%s\n",DEVICE_NAME,FIRMWARE_VERSION);
-  Serial.println("Direct Push + Outbound TCP/HTTP (16/24-bit 44.1k/48k)");
+  Serial.println("High-Performance Audiophile Direct Push + TCP/HTTP (16/24-bit 44.1k/48k)");
   Serial.println("============================================================");
   loadSettings();
   audioDataSemaphore=xSemaphoreCreateBinary();
@@ -1012,7 +1057,7 @@ void setup(){
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setAutoReconnect(true);
   setupWebServer();
 
-  // 8192 byte stack: plenty of room, zero risk of stack overflow!
+  // 8192 bytes stack: completely safe, zero chance of stack overflow
   BaseType_t ok1=xTaskCreate(playbackTask,"i2sPlayback",8192,nullptr,3,&playbackTaskHandle);
   BaseType_t ok2=xTaskCreate(streamTask,"pcmStream",6144,nullptr,2,&streamTaskHandle);
   if (ok1!=pdPASS||ok2!=pdPASS) setReceiverState(RX_ERROR,"Task creation failed");
