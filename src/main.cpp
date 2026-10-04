@@ -4,8 +4,8 @@
   Features:
     - 16-bit & 24-bit Audio @ 44.1kHz & 48kHz
     - 128 KB Massive Ring Buffer (Zero-Choppy Engine)
-    - Direct Phone Push (Port 50005) + Outbound TCP / HTTP
-    - Web UI Settings, Volume Control & Browser OTA
+    - TCP Push Server (50005) + Outbound TCP + HTTP Stream Client Fallback
+    - Full Web UI: Status, Controls, Settings & Browser OTA Upload
   Pinout:
     - OLED: SDA = GPIO 5, SCL = GPIO 6
     - I2S:  BCLK = GPIO 3, WS/LRCLK = GPIO 1, DOUT = GPIO 10
@@ -22,7 +22,7 @@
 #include <Wire.h>
 #include <driver/i2s.h>
 
-// --- Configuration Constants ---
+// --- Configuration Defaults ---
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
 static const char PHONE_HOST[] = "192.168.254.119";
@@ -47,11 +47,11 @@ static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
 static constexpr uint8_t DEFAULT_CHANNELS = 2;
 static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 16;
 
-// 128 KB Audio Ring Buffer (Over 450ms of audio cushion)
+// 128 KB Audio Ring Buffer (~450ms cushion)
 static constexpr size_t AUDIO_RING_BYTES = 131072;
 static constexpr size_t NETWORK_READ_BYTES = 1460;
 static constexpr size_t I2S_WRITE_BYTES = 2048;
-static constexpr uint32_t PREBUFFER_BYTES = 16000; // Lean start, 115 KB free headroom
+static constexpr uint32_t PREBUFFER_BYTES = 16000;
 
 static constexpr uint32_t STREAM_RETRY_MS = 2500;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
@@ -85,11 +85,10 @@ struct Settings {
   uint16_t httpPort = HTTP_DEFAULT_PORT;
   StreamMode preferredMode = STREAM_MODE_TCP;
   bool autoFallback = true, autoReconnect = true, oledEnabled = true, streamEnabled = true;
-  uint16_t targetBufferMs = 250;
   uint8_t volumePercent = 50;
 };
 
-// Global Drivers & Objects
+// Global System Objects
 static U8G2_SSD1306_72X40_ER_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 static bool oledAvailable = false;
 static Preferences preferences;
@@ -175,19 +174,25 @@ static void setReceiverState(ReceiverState value, const String &error = "") {
   }
 }
 
-// Thread-safe fast circular ring buffer
+// Thread-safe circular ring buffer (Guaranteed NO volatile std::min conflict)
 static inline bool ringWrite(const uint8_t *data, size_t length) {
   if (!data || length == 0) return true;
   bool ok = true;
   portENTER_CRITICAL(&ringMux);
-  size_t freeBytes = AUDIO_RING_BYTES - ringCount;
+  size_t currentCount = (size_t)ringCount;
+  size_t freeBytes = AUDIO_RING_BYTES - currentCount;
   if (length > freeBytes) { length = freeBytes; ok = false; }
-  size_t first = min(length, AUDIO_RING_BYTES - ringWriteIndex);
-  memcpy(audioRing + ringWriteIndex, data, first);
+
+  size_t currentWrite = (size_t)ringWriteIndex;
+  size_t spaceToEnd = AUDIO_RING_BYTES - currentWrite;
+  size_t first = (length < spaceToEnd) ? length : spaceToEnd;
+  memcpy(audioRing + currentWrite, data, first);
+
   size_t second = length - first;
   if (second > 0) memcpy(audioRing, data + first, second);
-  ringWriteIndex = (ringWriteIndex + length) % AUDIO_RING_BYTES;
-  ringCount += length;
+
+  ringWriteIndex = (currentWrite + length) % AUDIO_RING_BYTES;
+  ringCount = currentCount + length;
   portEXIT_CRITICAL(&ringMux);
   if (length > 0 && audioDataSemaphore) xSemaphoreGive(audioDataSemaphore);
   return ok;
@@ -196,14 +201,19 @@ static inline bool ringWrite(const uint8_t *data, size_t length) {
 static inline size_t ringRead(uint8_t *out, size_t maxLen) {
   if (!out || maxLen == 0) return 0;
   portENTER_CRITICAL(&ringMux);
-  size_t len = min(maxLen, ringCount);
+  size_t currentCount = (size_t)ringCount;
+  size_t len = (maxLen < currentCount) ? maxLen : currentCount;
   if (len > 0) {
-    size_t first = min(len, AUDIO_RING_BYTES - ringReadIndex);
-    memcpy(out, audioRing + ringReadIndex, first);
+    size_t currentRead = (size_t)ringReadIndex;
+    size_t spaceToEnd = AUDIO_RING_BYTES - currentRead;
+    size_t first = (len < spaceToEnd) ? len : spaceToEnd;
+    memcpy(out, audioRing + currentRead, first);
+
     size_t second = len - first;
     if (second > 0) memcpy(out + first, audioRing, second);
-    ringReadIndex = (ringReadIndex + len) % AUDIO_RING_BYTES;
-    ringCount -= len;
+
+    ringReadIndex = (currentRead + len) % AUDIO_RING_BYTES;
+    ringCount = currentCount - len;
   }
   portEXIT_CRITICAL(&ringMux);
   return len;
@@ -218,7 +228,7 @@ static inline void ringClear() {
 
 static inline size_t ringSize() {
   portENTER_CRITICAL(&ringMux);
-  size_t v = ringCount;
+  size_t v = (size_t)ringCount;
   portEXIT_CRITICAL(&ringMux);
   return v;
 }
@@ -242,7 +252,7 @@ static void displayBegin() {
 
 static void displayUpdate() {
   if (!oledAvailable || !settings.oledEnabled) return;
-  // PERFORMANCE FIX: Skip I2C updates during streaming so audio is 100% uninterrupted
+  // Quiet I2C during streaming to prevent bus contention
   if (receiverState == RX_STREAMING) return;
   if (millis() - lastOledRefreshMs < OLED_REFRESH_MS) return;
   lastOledRefreshMs = millis();
@@ -316,20 +326,11 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   i2sReady = true;
   if (i2sMux) xSemaphoreGive(i2sMux);
 
-  Serial.printf("[I2S] Initialized: %lu Hz, %u-bit, %s\n", (unsigned long)sr, bits, ch == 2 ? "Stereo" : "Mono");
+  Serial.printf("[I2S] Running %lu Hz, %u-bit, %s\n", (unsigned long)sr, bits, ch == 2 ? "Stereo" : "Mono");
   return true;
 }
 
-static void endI2S() {
-  if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
-  if (i2sReady) {
-    i2s_driver_uninstall(I2S_NUM_0);
-    i2sReady = false;
-  }
-  if (i2sMux) xSemaphoreGive(i2sMux);
-}
-
-// Memory in static DRAM (Zero FreeRTOS task stack usage)
+// DRAM Buffers: 0 stack usage
 static uint8_t playbackIn[I2S_WRITE_BYTES / 2];
 static uint8_t playbackOut[I2S_WRITE_BYTES * 2];
 
@@ -357,7 +358,6 @@ static void playbackTask(void*) {
     const uint8_t volume = settings.volumePercent;
 
     if (streamFormat.bitsPerSample == 16) {
-      // 16-bit processing
       if (volume < 100) {
         int16_t *samples = reinterpret_cast<int16_t*>(playbackIn);
         size_t count = n / sizeof(int16_t);
@@ -379,7 +379,6 @@ static void playbackTask(void*) {
       }
     } 
     else if (streamFormat.bitsPerSample == 24) {
-      // 24-bit PCM: align 3-byte samples into 32-bit slot for UDA1334A DAC
       size_t count = n / 3;
       int32_t *dst32 = reinterpret_cast<int32_t*>(playbackOut);
 
@@ -388,9 +387,9 @@ static void playbackTask(void*) {
         int32_t s = (int32_t)((uint32_t)playbackIn[idx] |
                              ((uint32_t)playbackIn[idx + 1] << 8) |
                              ((uint32_t)playbackIn[idx + 2] << 16));
-        if (s & 0x00800000) s |= 0xFF000000; // Sign extend
+        if (s & 0x00800000) s |= 0xFF000000;
         if (volume < 100) s = (s * volume) / 100;
-        dst32[i] = s << 8; // MSB aligned in 32-bit slot
+        dst32[i] = s << 8;
       }
       writeBuf = playbackOut;
       writeLen = count * 4;
@@ -413,7 +412,6 @@ static void runConnectedStream() {
   ringClear();
   setReceiverState(RX_BUFFERING);
 
-  // Synchronous header check: detect 16-bit vs 24-bit without re-init thrashing
   uint32_t waitStart = millis();
   while (streamClient.connected() && streamClient.available() < 16 && (millis() - waitStart < 300)) {
     delay(2);
@@ -451,7 +449,8 @@ static void runConnectedStream() {
   while (!stopRequested && streamClient.connected() && WiFi.status() == WL_CONNECTED) {
     int av = streamClient.available();
     if (av > 0) {
-      size_t w = min((size_t)av, sizeof(in));
+      size_t availBytes = (size_t)av;
+      size_t w = (availBytes < sizeof(in)) ? availBytes : sizeof(in);
       int n = streamClient.read(in, w);
       if (n > 0) {
         stats.bytesReceived += n;
@@ -477,6 +476,55 @@ static void runConnectedStream() {
   }
 }
 
+// HTTP Audio Stream Client Fallback
+static void runHttpStream() {
+  setReceiverState(RX_CONNECTING);
+  if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
+  streamClient.stop();
+  bool ok = streamClient.connect(settings.phoneHost.c_str(), settings.httpPort);
+  if (streamClientMux) xSemaphoreGive(streamClientMux);
+
+  if (!ok) {
+    stats.streamErrors++;
+    setReceiverState(RX_ERROR, "HTTP Connect failed");
+    return;
+  }
+
+  streamClient.setNoDelay(true);
+  streamClient.print(String("GET /stream.wav HTTP/1.1\r\n") +
+                     "Host: " + settings.phoneHost + "\r\n" +
+                     "User-Agent: C3Music/1.4\r\n" +
+                     "Connection: close\r\n\r\n");
+
+  uint32_t headerStart = millis();
+  bool inHeader = true;
+  String line = "";
+
+  while (streamClient.connected() && inHeader && (millis() - headerStart < HTTP_HEADER_TIMEOUT_MS)) {
+    if (streamClient.available()) {
+      char c = streamClient.read();
+      if (c == '\r') continue;
+      if (c == '\n') {
+        if (line.length() == 0) inHeader = false;
+        line = "";
+      } else {
+        line += c;
+      }
+    } else {
+      vTaskDelay(pdMS_TO_TICKS(2));
+    }
+  }
+
+  if (inHeader) {
+    stats.streamErrors++;
+    setReceiverState(RX_ERROR, "HTTP Header timeout");
+    return;
+  }
+
+  stats.reconnects++;
+  runConnectedStream();
+}
+
 static void stopStreamClient() {
   if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
   streamClient.stop();
@@ -500,7 +548,7 @@ static void streamTask(void*) {
       continue;
     }
 
-    // Direct Push Socket Listener
+    // Direct Push Listener on port 50005
     if (tcpPushServerStarted) {
       WiFiClient pushed = tcpPushServer.available();
       if (pushed) {
@@ -522,27 +570,36 @@ static void streamTask(void*) {
       }
     }
 
-    // Outbound Connection to Phone
+    // Outbound Connect
     if (millis() - lastStreamAttemptMs < STREAM_RETRY_MS) {
       vTaskDelay(pdMS_TO_TICKS(20));
       continue;
     }
     lastStreamAttemptMs = millis();
 
-    setReceiverState(RX_CONNECTING);
-    bool ok = false;
-    if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
-    streamClient.stop();
-    ok = streamClient.connect(settings.phoneHost.c_str(), settings.tcpPort);
-    if (ok) streamClient.setNoDelay(true);
-    if (streamClientMux) xSemaphoreGive(streamClientMux);
-
-    if (ok) {
-      stats.reconnects++;
-      runConnectedStream();
+    if (settings.preferredMode == STREAM_MODE_HTTP) {
+      runHttpStream();
     } else {
-      stats.streamErrors++;
-      setReceiverState(RX_ERROR, "Phone unavailable");
+      setReceiverState(RX_CONNECTING);
+      bool ok = false;
+      if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
+      streamClient.stop();
+      ok = streamClient.connect(settings.phoneHost.c_str(), settings.tcpPort);
+      if (ok) streamClient.setNoDelay(true);
+      if (streamClientMux) xSemaphoreGive(streamClientMux);
+
+      if (ok) {
+        stats.reconnects++;
+        runConnectedStream();
+      } else {
+        if (settings.autoFallback) {
+          Serial.println("[STREAM] TCP failed, trying HTTP fallback...");
+          runHttpStream();
+        } else {
+          stats.streamErrors++;
+          setReceiverState(RX_ERROR, "Phone unavailable");
+        }
+      }
     }
 
     stopStreamClient();
@@ -551,7 +608,7 @@ static void streamTask(void*) {
   }
 }
 
-// Web Server Implementation
+// Full Web Dashboard, Settings & OTA Upload
 static void sendJson(int code, const String &body) {
   server.sendHeader("Cache-Control", "no-cache");
   server.send(code, "application/json", body);
@@ -581,6 +638,12 @@ static String makeConfigJson() {
   String r = "{";
   r += "\"host\":\"" + settings.phoneHost + "\",";
   r += "\"tcpPort\":" + String(settings.tcpPort) + ",";
+  r += "\"httpPort\":" + String(settings.httpPort) + ",";
+  r += "\"mode\":" + String((int)settings.preferredMode) + ",";
+  r += "\"fallback\":" + String(settings.autoFallback ? "true" : "false") + ",";
+  r += "\"autorecon\":" + String(settings.autoReconnect ? "true" : "false") + ",";
+  r += "\"oled\":" + String(settings.oledEnabled ? "true" : "false") + ",";
+  r += "\"enabled\":" + String(settings.streamEnabled ? "true" : "false") + ",";
   r += "\"volume\":" + String(settings.volumePercent);
   r += "}";
   return r;
@@ -594,40 +657,145 @@ static const char HTML_PAGE[] PROGMEM = R"HTML(
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>C3 Music Receiver</title>
 <style>
-body{margin:0;padding:20px;background:#121212;color:#eee;font-family:sans-serif}
-.card{background:#1e1e1e;border-radius:12px;padding:20px;margin-bottom:16px;max-width:500px;margin-left:auto;margin-right:auto}
-h2{margin-top:0}
-.row{display:flex;justify-content:space-between;margin:8px 0;border-bottom:1px solid #2a2a2a;padding-bottom:8px}
-button{background:#4caf50;color:#fff;border:none;padding:10px 16px;border-radius:8px;font-weight:bold;cursor:pointer}
-input[type=range]{width:100%}
+body{margin:0;padding:16px;background:#121212;color:#eee;font-family:system-ui,-apple-system,sans-serif}
+.container{max-width:540px;margin:0 auto}
+.card{background:#1e1e1e;border-radius:12px;padding:16px;margin-bottom:16px;border:1px solid #2a2a2a}
+h2{margin:0 0 12px 0;font-size:1.2rem}
+.tabs{display:flex;gap:8px;margin-bottom:16px}
+.tab{background:#2a2a2a;color:#aaa;padding:8px 16px;border-radius:8px;border:none;cursor:pointer;font-weight:600}
+.tab.active{background:#3b82f6;color:#fff}
+.row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid #282828}
+.btn{background:#3b82f6;color:#fff;border:none;padding:10px 14px;border-radius:8px;cursor:pointer;font-weight:600}
+.btn-red{background:#ef4444}
+.btn-green{background:#10b981}
+input,select{background:#2a2a2a;color:#fff;border:1px solid #444;padding:8px;border-radius:6px;width:100%;box-sizing:border-box;margin-top:4px}
+input[type=range]{padding:0}
+label{font-size:0.85rem;color:#aaa;display:block;margin-top:10px}
 </style>
 </head>
 <body>
-<div class="card">
-  <h2>C3 Music Receiver (v1.4.0)</h2>
-  <div class="row"><span>Status:</span><b id="st">—</b></div>
-  <div class="row"><span>Format:</span><span id="fmt">—</span></div>
-  <div class="row"><span>Buffer:</span><span id="buf">—</span></div>
-  <div class="row"><span>Wi-Fi IP:</span><span id="ip">—</span></div>
-  <div style="margin-top:16px">
-    <label>Volume: <span id="vval">50%</span></label>
-    <input type="range" id="vol" min="0" max="100" value="50" onchange="setVol(this.value)">
+<div class="container">
+  <div class="card" style="display:flex;justify-content:space-between;align-items:center">
+    <div>
+      <h2 style="margin:0">C3 Music Receiver</h2>
+      <small style="color:#888">v1.4.0 • Zero-Choppy Edition</small>
+    </div>
+    <span id="stBadge" style="background:#2563eb;padding:4px 10px;border-radius:20px;font-size:0.8rem;font-weight:700">Connecting</span>
+  </div>
+
+  <div class="tabs">
+    <button class="tab active" onclick="showTab('status')">Status</button>
+    <button class="tab" onclick="showTab('controls')">Controls</button>
+    <button class="tab" onclick="showTab('settings')">Settings</button>
+    <button class="tab" onclick="showTab('ota')">OTA Update</button>
+  </div>
+
+  <div id="tab-status" class="card">
+    <div class="row"><span>Status:</span><b id="st">—</b></div>
+    <div class="row"><span>Audio Format:</span><span id="fmt">—</span></div>
+    <div class="row"><span>Ring Buffer:</span><span id="buf">—</span></div>
+    <div class="row"><span>Underruns:</span><span id="und">—</span></div>
+    <div class="row"><span>Device IP:</span><span id="ip">—</span></div>
+    <div class="row"><span>Wi-Fi Signal:</span><span id="rssi">—</span></div>
+    <div style="margin-top:14px">
+      <label>Hardware Volume: <span id="vval">50%</span></label>
+      <input type="range" id="vol" min="0" max="100" value="50" onchange="setVol(this.value)">
+    </div>
+  </div>
+
+  <div id="tab-controls" class="card" style="display:none">
+    <h2>Playback Control</h2>
+    <div style="display:flex;gap:10px;margin-top:12px">
+      <button class="btn btn-green" style="flex:1" onclick="fetch('/api/stream/start',{method:'POST'}).then(update)">Start</button>
+      <button class="btn btn-red" style="flex:1" onclick="fetch('/api/stream/stop',{method:'POST'}).then(update)">Stop</button>
+      <button class="btn" style="flex:1" onclick="fetch('/api/stream/reconnect',{method:'POST'}).then(update)">Reconnect</button>
+    </div>
+    <div style="margin-top:16px">
+      <button class="btn btn-red" style="width:100%" onclick="if(confirm('Reboot C3 Receiver?')) fetch('/api/system/reboot',{method:'POST'})">Reboot Device</button>
+    </div>
+  </div>
+
+  <div id="tab-settings" class="card" style="display:none">
+    <h2>Receiver Configuration</h2>
+    <label>Phone IP Address</label>
+    <input type="text" id="cfgHost">
+    <label>TCP Streaming Port</label>
+    <input type="number" id="cfgTcp">
+    <label>HTTP Port</label>
+    <input type="number" id="cfgHttp">
+    <label>Preferred Mode</label>
+    <select id="cfgMode">
+      <option value="0">TCP Socket (Recommended)</option>
+      <option value="1">HTTP Stream</option>
+    </select>
+    <div style="margin-top:16px">
+      <button class="btn" style="width:100%" onclick="saveCfg()">Save Settings</button>
+    </div>
+  </div>
+
+  <div id="tab-ota" class="card" style="display:none">
+    <h2>Firmware Update (.bin)</h2>
+    <p style="font-size:0.85rem;color:#aaa">Select your compiled firmware.bin file to flash over Wi-Fi:</p>
+    <form method="POST" action="/api/ota" enctype="multipart/form-data" id="otaForm">
+      <input type="file" name="update" id="otaFile" style="margin-bottom:12px" accept=".bin">
+      <button type="submit" class="btn btn-green" style="width:100%">Upload & Flash Firmware</button>
+    </form>
+    <div id="otaProgress" style="display:none;margin-top:12px;font-weight:bold;color:#3b82f6">Flashing... please wait...</div>
   </div>
 </div>
+
 <script>
+function showTab(t){
+  ['status','controls','settings','ota'].forEach(id=>{
+    document.getElementById('tab-'+id).style.display = (id===t)?'block':'none';
+  });
+  document.querySelectorAll('.tab').forEach((el,i)=>{
+    el.classList.toggle('active', ['status','controls','settings','ota'][i]===t);
+  });
+  if(t==='settings') loadCfg();
+}
+
 function update(){
   fetch('/api/status').then(r=>r.json()).then(d=>{
     document.getElementById('st').textContent=d.state;
+    document.getElementById('stBadge').textContent=d.state;
     document.getElementById('fmt').textContent=d.sampleRate+' Hz • '+d.bits+'-bit • '+(d.channels==2?'Stereo':'Mono');
     document.getElementById('buf').textContent=d.bufferPercent+'% ('+d.bufferBytes+' bytes)';
+    document.getElementById('und').textContent=d.underruns;
     document.getElementById('ip').textContent=d.ip;
+    document.getElementById('rssi').textContent=d.rssi+' dBm';
   }).catch(()=>{});
 }
+
 function setVol(v){
   document.getElementById('vval').textContent=v+'%';
   fetch('/api/volume',{method:'POST',body:new URLSearchParams({value:v})});
 }
-setInterval(update,1000);
+
+function loadCfg(){
+  fetch('/api/config').then(r=>r.json()).then(d=>{
+    document.getElementById('cfgHost').value=d.host;
+    document.getElementById('cfgTcp').value=d.tcpPort;
+    document.getElementById('cfgHttp').value=d.httpPort;
+    document.getElementById('cfgMode').value=d.mode;
+  });
+}
+
+function saveCfg(){
+  const body = new URLSearchParams({
+    host: document.getElementById('cfgHost').value,
+    tcpPort: document.getElementById('cfgTcp').value,
+    httpPort: document.getElementById('cfgHttp').value,
+    mode: document.getElementById('cfgMode').value
+  });
+  fetch('/api/config',{method:'POST',body}).then(()=>alert('Settings Saved!'));
+}
+
+document.getElementById('otaForm').onsubmit = function(){
+  document.getElementById('otaProgress').style.display='block';
+};
+
+setInterval(update, 1000);
 update();
 </script>
 </body>
@@ -644,6 +812,14 @@ static void setupWebServer() {
   server.on("/api/config", HTTP_GET, []() {
     sendJson(200, makeConfigJson());
   });
+  server.on("/api/config", HTTP_POST, []() {
+    if (server.hasArg("host")) settings.phoneHost = server.arg("host");
+    if (server.hasArg("tcpPort")) settings.tcpPort = server.arg("tcpPort").toInt();
+    if (server.hasArg("httpPort")) settings.httpPort = server.arg("httpPort").toInt();
+    if (server.hasArg("mode")) settings.preferredMode = (StreamMode)server.arg("mode").toInt();
+    saveSettings();
+    sendJson(200, "{\"ok\":true}");
+  });
   server.on("/api/volume", HTTP_POST, []() {
     int v = server.arg("value").toInt();
     if (v >= 0 && v <= 100) {
@@ -652,11 +828,61 @@ static void setupWebServer() {
     }
     sendJson(200, "{\"ok\":true}");
   });
+  server.on("/api/stream/start", HTTP_POST, []() {
+    settings.streamEnabled = true;
+    stopRequested = false;
+    sendJson(200, "{\"ok\":true}");
+  });
+  server.on("/api/stream/stop", HTTP_POST, []() {
+    settings.streamEnabled = false;
+    stopRequested = true;
+    stopStreamClient();
+    ringClear();
+    setReceiverState(RX_STOPPED);
+    sendJson(200, "{\"ok\":true}");
+  });
+  server.on("/api/stream/reconnect", HTTP_POST, []() {
+    stopStreamClient();
+    ringClear();
+    lastStreamAttemptMs = 0;
+    sendJson(200, "{\"ok\":true}");
+  });
   server.on("/api/system/reboot", HTTP_POST, []() {
     sendJson(200, "{\"ok\":true}");
     delay(200);
     ESP.restart();
   });
+
+  // Browser OTA Upload Handler
+  server.on("/api/ota", HTTP_POST, []() {
+    server.sendHeader("Connection", "close");
+    server.send(200, "text/plain", (Update.hasError()) ? "OTA FAILED" : "OTA SUCCESS! Rebooting...");
+    delay(500);
+    ESP.restart();
+  }, []() {
+    HTTPUpload& upload = server.upload();
+    if (upload.status == UPLOAD_FILE_START) {
+      setReceiverState(RX_UPDATING);
+      stopRequested = true;
+      stopStreamClient();
+      ringClear();
+      Serial.printf("[OTA] Starting: %s\n", upload.filename.c_str());
+      if (!Update.begin(UPDATE_SIZE_UNKNOWN)) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_WRITE) {
+      if (Update.write(upload.buf, upload.currentSize) != upload.currentSize) {
+        Update.printError(Serial);
+      }
+    } else if (upload.status == UPLOAD_FILE_END) {
+      if (Update.end(true)) {
+        Serial.printf("[OTA] Success: %u bytes\n", upload.totalSize);
+      } else {
+        Update.printError(Serial);
+      }
+    }
+  });
+
   server.begin();
 }
 
@@ -680,7 +906,6 @@ void setup() {
 
   setupWebServer();
 
-  // 8192-byte stack for playbackTask = zero chance of stack overflow
   xTaskCreate(playbackTask, "playback", 8192, nullptr, 3, &playbackTaskHandle);
   xTaskCreate(streamTask, "stream", 6144, nullptr, 2, &streamTaskHandle);
 
