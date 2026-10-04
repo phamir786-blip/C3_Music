@@ -2,6 +2,8 @@
   C3 Music Receiver
   ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
   TCP PCM (50005) primary, HTTP WAV (8080) fallback
+  Dual-Mode: Direct Push Server (c3music.local:50005) + Outbound Client
+  Supports: 16-bit/24-bit @ 44.1kHz / 48kHz
   OLED: SDA 5, SCL 6
   I2S: BCLK 3, LRCLK 1, DOUT 10
 */
@@ -24,7 +26,7 @@ static const char PHONE_HOST[] = "192.168.254.119";
 
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3music";
-static const char FIRMWARE_VERSION[] = "1.0.0";
+static const char FIRMWARE_VERSION[] = "1.1.0";
 
 static constexpr uint8_t OLED_SDA = 5;
 static constexpr uint8_t OLED_SCL = 6;
@@ -90,6 +92,7 @@ static U8G2_SSD1306_72X40_ER_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
 static bool oledAvailable = false;
 static Preferences preferences;
 static WebServer server(80);
+static WiFiServer tcpPushServer(TCP_DEFAULT_PORT);
 static WiFiClient streamClient;
 static Settings settings;
 static StreamFormat streamFormat;
@@ -107,6 +110,7 @@ static SemaphoreHandle_t streamClientMux = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr, playbackTaskHandle = nullptr;
 static uint32_t lastWifiAttemptMs = 0, lastStreamAttemptMs = 0, lastOledRefreshMs = 0, lastStatusRefreshMs = 0;
 static bool mdnsStarted = false;
+static bool tcpPushServerStarted = false;
 
 static void loadSettings() {
   preferences.begin("c3music", false);
@@ -263,7 +267,7 @@ static void displayUpdate() {
   int sw = oled.getStrWidth(st);
   oled.drawStr(OLED_WIDTH - sw, 7, st);
   if (receiverState == RX_STREAMING || receiverState == RX_BUFFERING) {
-    snprintf(buf, sizeof(buf), "%luk %s", (unsigned long)(streamFormat.sampleRate/1000), streamFormat.channels==2?"ST":"MO");
+    snprintf(buf, sizeof(buf), "%luk %ub %s", (unsigned long)(streamFormat.sampleRate/1000), streamFormat.bitsPerSample, streamFormat.channels==2?"ST":"MO");
     displayLineCenter(buf, 19, u8g2_font_6x10_tf);
     snprintf(buf, sizeof(buf), "BUF %u%%", ringPercent());
     displayLineCenter(buf, 29, u8g2_font_4x6_tf);
@@ -332,13 +336,28 @@ static void connectWifiIfNeeded() {
 }
 
 static void beginMdnsIfNeeded() {
-  if (mdnsStarted || WiFi.status()!=WL_CONNECTED) return;
-  if (MDNS.begin(MDNS_HOSTNAME)) { MDNS.addService("http","tcp",80); mdnsStarted=true; Serial.printf("[MDNS] http://%s.local/\n", MDNS_HOSTNAME); }
-  else Serial.println("[MDNS] Failed");
+  if (WiFi.status()!=WL_CONNECTED) return;
+  if (!mdnsStarted) {
+    if (MDNS.begin(MDNS_HOSTNAME)) {
+      MDNS.addService("http","tcp",80);
+      MDNS.addService("c3stream","tcp",TCP_DEFAULT_PORT);
+      mdnsStarted=true;
+      Serial.printf("[MDNS] http://%s.local/ and c3music.local:%u\n", MDNS_HOSTNAME, TCP_DEFAULT_PORT);
+    } else {
+      Serial.println("[MDNS] Failed");
+    }
+  }
+  if (!tcpPushServerStarted) {
+    tcpPushServer.begin();
+    tcpPushServer.setNoDelay(true);
+    tcpPushServerStarted = true;
+    Serial.printf("[PUSH SERVER] Listening on port %u for phone push\n", TCP_DEFAULT_PORT);
+  }
 }
 
 static bool supportedPcmFormat(const StreamFormat &f) {
-  return f.audioFormat==1 && f.bitsPerSample==16 && (f.channels==1||f.channels==2) && f.sampleRate>=8000 && f.sampleRate<=96000;
+  return f.audioFormat==1 && (f.bitsPerSample==16 || f.bitsPerSample==24) &&
+         (f.channels==1||f.channels==2) && f.sampleRate>=8000 && f.sampleRate<=96000;
 }
 
 static void endI2S() {
@@ -347,15 +366,15 @@ static void endI2S() {
   if (i2sMux) xSemaphoreGive(i2sMux);
 }
 
-static uint32_t targetPrebufferBytes() {  uint64_t bytesPerSecond = (uint64_t)streamFormat.sampleRate *
+static uint32_t targetPrebufferBytes() {
+  uint64_t bytesPerSecond = (uint64_t)streamFormat.sampleRate *
                             (uint64_t)streamFormat.channels *
                             (uint64_t)(streamFormat.bitsPerSample / 8);
   if (bytesPerSecond == 0) bytesPerSecond =
       (uint64_t)DEFAULT_SAMPLE_RATE * DEFAULT_CHANNELS * (DEFAULT_BITS_PER_SAMPLE / 8);
   uint64_t bytes = (bytesPerSecond * settings.targetBufferMs) / 1000ULL;
-  // Keep prebuffer responsive (between 4KB and 16KB)
   if (bytes < 4096) bytes = 4096;
-  if (bytes > 16384) bytes = 16384;
+  if (bytes > 24576) bytes = 24576;
   return (uint32_t)bytes;
 }
 
@@ -365,17 +384,19 @@ static void stopStreamClient() {
   if (streamClientMux) xSemaphoreGive(streamClientMux);
 }
 
+// Fixed I2S configuration supporting 16-bit and 24-bit at 44.1kHz and 48kHz
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
-  if (bits!=16 || (ch!=1 && ch!=2)) return false;
+  if ((bits!=16 && bits!=24) || (ch!=1 && ch!=2)) return false;
   
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
   if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
 
-  // Fixed I2S configuration for ESP32-C3 & UDA1334A DAC
+  i2s_bits_per_sample_t bps = (bits == 24) ? I2S_BITS_PER_SAMPLE_24BIT : I2S_BITS_PER_SAMPLE_16BIT;
+
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
     .sample_rate = sr,
-    .bits_per_sample = I2S_BITS_PER_SAMPLE_16BIT,
+    .bits_per_sample = bps,
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
@@ -383,7 +404,7 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
     .dma_buf_len = 512,
     .use_apll = false,          // ESP32-C3 does NOT support APLL!
     .tx_desc_auto_clear = true,  // Automatically clears DMA buffer on underrun
-    .fixed_mclk = 0             // Must be 0! (Do NOT set to I2S_PIN_NO_CHANGE)
+    .fixed_mclk = 0
   };
   
   if (i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr) != ESP_OK) {
@@ -485,7 +506,7 @@ static bool connectRawTcp() {
   Serial.printf("[TCP] Connecting to %s:%u\n",settings.phoneHost.c_str(),settings.tcpPort);
   if (!connectStreamHost(settings.tcpPort)){ stats.lastError="TCP host unavailable"; return false; }
   streamClient.setNoDelay(true);
-  streamClient.setTimeout(3); // 3 seconds timeout
+  streamClient.setTimeout(3);
   if (!beginI2S(streamFormat.sampleRate,streamFormat.channels,streamFormat.bitsPerSample)){ stats.lastError="I2S setup failed"; streamClient.stop(); return false; }
   return true;
 }
@@ -495,8 +516,7 @@ static bool connectHttpWav() {
   Serial.printf("[HTTP] Connecting to http://%s:%u/\n",settings.phoneHost.c_str(),settings.httpPort);
   if (!connectStreamHost(settings.httpPort)){ stats.lastError="HTTP host unavailable"; return false; }
   streamClient.setNoDelay(true);
-  streamClient.setTimeout(3); // 3 seconds timeout
-  // Fixed: Connect to "/" which is standard for pkarthikmohan/wifi-audio-streamer on port 8080
+  streamClient.setTimeout(3);
   streamClient.printf("GET / HTTP/1.1\r\nHost: %s:%u\r\nUser-Agent: C3MusicReceiver/%s\r\nAccept: audio/wav,audio/x-wav,*/*\r\nConnection: close\r\n\r\n", settings.phoneHost.c_str(), settings.httpPort, FIRMWARE_VERSION);
   if (!parseHttpHeaders()){ streamClient.stop(); return false; }
   StreamFormat pf;
@@ -524,25 +544,48 @@ static void playbackTask(void*) {
     const uint8_t *writeBuf = in;
     size_t writeLen = n;
 
-    // Software volume: scale PCM immediately before I2S output.
-    // Uses only the existing playback buffer; streaming/buffering is unchanged.
+    // Software volume: scale PCM immediately before I2S output (16-bit or 24-bit).
     uint8_t volume = settings.volumePercent;
     if (volume < 100) {
-      int16_t *samples = reinterpret_cast<int16_t*>(in);
-      size_t sampleCount = n / sizeof(int16_t);
-      for (size_t i = 0; i < sampleCount; ++i) {
-        samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
+      if (streamFormat.bitsPerSample == 16) {
+        int16_t *samples = reinterpret_cast<int16_t*>(in);
+        size_t sampleCount = n / sizeof(int16_t);
+        for (size_t i = 0; i < sampleCount; ++i) {
+          samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
+        }
+      } else if (streamFormat.bitsPerSample == 24) {
+        // 24-bit PCM: 3 bytes per sample
+        size_t sampleCount = n / 3;
+        for (size_t i = 0; i < sampleCount; ++i) {
+          size_t idx = i * 3;
+          int32_t s = (int32_t)((uint32_t)in[idx] | ((uint32_t)in[idx+1] << 8) | ((uint32_t)in[idx+2] << 16));
+          if (s & 0x00800000) s |= 0xFF000000; // Sign extend
+          s = (s * volume) / 100;
+          in[idx]     = (uint8_t)(s & 0xFF);
+          in[idx + 1] = (uint8_t)((s >> 8) & 0xFF);
+          in[idx + 2] = (uint8_t)((s >> 16) & 0xFF);
+        }
       }
     }
 
     // If incoming stream is mono (1 channel), duplicate into Left and Right stereo
     if (streamFormat.channels==1) {
-      size_t samples = n / 2;
-      int16_t *src = reinterpret_cast<int16_t*>(in);
-      int16_t *dst = reinterpret_cast<int16_t*>(out);
-      for (size_t i=0;i<samples;i++) { dst[i*2]=src[i]; dst[i*2+1]=src[i]; }
-      writeBuf = out;
-      writeLen = samples * 4;
+      if (streamFormat.bitsPerSample == 16) {
+        size_t samples = n / 2;
+        int16_t *src = reinterpret_cast<int16_t*>(in);
+        int16_t *dst = reinterpret_cast<int16_t*>(out);
+        for (size_t i=0;i<samples;i++) { dst[i*2]=src[i]; dst[i*2+1]=src[i]; }
+        writeBuf = out;
+        writeLen = samples * 4;
+      } else if (streamFormat.bitsPerSample == 24) {
+        size_t samples = n / 3;
+        for (size_t i = 0; i < samples; i++) {
+          out[i*6]   = in[i*3];   out[i*6+1] = in[i*3+1]; out[i*6+2] = in[i*3+2];
+          out[i*6+3] = in[i*3];   out[i*6+4] = in[i*3+1]; out[i*6+5] = in[i*3+2];
+        }
+        writeBuf = out;
+        writeLen = samples * 6;
+      }
     }
 
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
@@ -559,10 +602,37 @@ static void playbackTask(void*) {
 static void runConnectedStream() {
   uint8_t in[NETWORK_READ_BYTES];
   stats.sessionStartedMs=millis(); stats.lastReceiveMs=millis(); ringClear(); setReceiverState(RX_BUFFERING);
+  bool checkedHeader = false;
+
   while (!stopRequested && streamClient.connected() && WiFi.status()==WL_CONNECTED) {
     int av=streamClient.available();
     if (av>0){
-      size_t w=min((size_t)av,sizeof(in));
+      // Check for C3 dynamic format header: "C3MS" (16 bytes)
+      if (!checkedHeader && av >= 16) {
+        uint8_t peekBuf[16];
+        if (streamClient.peekBytes(peekBuf, 16) >= 16) {
+          if (peekBuf[0] == 'C' && peekBuf[1] == '3' && peekBuf[2] == 'M' && peekBuf[3] == 'S') {
+            // Read and consume header
+            streamClient.readBytes(peekBuf, 16);
+            uint8_t bits = peekBuf[5];
+            uint16_t ch = peekBuf[6];
+            uint32_t sr = (uint32_t)peekBuf[8] | ((uint32_t)peekBuf[9] << 8) | ((uint32_t)peekBuf[10] << 16) | ((uint32_t)peekBuf[11] << 24);
+            Serial.printf("[C3MS HEADER] Detected format: %lu Hz, %u-bit, %u ch\n", (unsigned long)sr, bits, ch);
+            if ((bits == 16 || bits == 24) && (ch == 1 || ch == 2) && (sr >= 8000 && sr <= 96000)) {
+              if (sr != streamFormat.sampleRate || bits != streamFormat.bitsPerSample || ch != streamFormat.channels) {
+                streamFormat.sampleRate = sr;
+                streamFormat.bitsPerSample = bits;
+                streamFormat.channels = ch;
+                streamFormat.valid = true;
+                beginI2S(sr, ch, bits);
+              }
+            }
+          }
+        }
+        checkedHeader = true;
+      }
+
+      size_t w=min((size_t)streamClient.available(), sizeof(in));
       int n=streamClient.read(in,w);
       if (n>0){
         stats.bytesReceived+=n;
@@ -602,7 +672,43 @@ static void streamTask(void*) {
       vTaskDelay(pdMS_TO_TICKS(500));
       continue;
     }
-    if (!settings.streamEnabled||stopRequested){ streamClient.stop(); endI2S(); ringClear(); if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED); vTaskDelay(pdMS_TO_TICKS(150)); continue; }
+
+    if (!settings.streamEnabled||stopRequested){
+      streamClient.stop(); endI2S(); ringClear();
+      if (receiverState!=RX_STOPPED) setReceiverState(RX_STOPPED);
+      vTaskDelay(pdMS_TO_TICKS(150));
+      continue;
+    }
+
+    // 1. Direct Push check: did phone push audio directly to c3music.local:50005?
+    if (tcpPushServerStarted) {
+      WiFiClient pushedClient = tcpPushServer.available();
+      if (pushedClient) {
+        stopStreamClient(); endI2S(); ringClear();
+        if (streamClientMux) xSemaphoreTake(streamClientMux, portMAX_DELAY);
+        streamClient = pushedClient;
+        streamClient.setNoDelay(true);
+        streamClient.setTimeout(3);
+        if (streamClientMux) xSemaphoreGive(streamClientMux);
+
+        Serial.printf("[PUSH SERVER] Phone connected directly from %s!\n", streamClient.remoteIP().toString().c_str());
+        streamFormat.sampleRate = DEFAULT_SAMPLE_RATE;
+        streamFormat.channels = DEFAULT_CHANNELS;
+        streamFormat.bitsPerSample = DEFAULT_BITS_PER_SAMPLE;
+        streamFormat.audioFormat = 1;
+        streamFormat.valid = true;
+        beginI2S(streamFormat.sampleRate, streamFormat.channels, streamFormat.bitsPerSample);
+
+        stats.reconnects++;
+        runConnectedStream();
+
+        streamClient.stop(); endI2S(); ringClear();
+        vTaskDelay(pdMS_TO_TICKS(100));
+        continue;
+      }
+    }
+
+    // 2. Outbound Connection: connects to configured phoneHost if push wasn't used
     if (millis()-lastStreamAttemptMs<STREAM_RETRY_MS){ vTaskDelay(pdMS_TO_TICKS(20)); continue; }
     lastStreamAttemptMs=millis();
     bool ok=false; StreamMode tr=settings.preferredMode;
@@ -716,7 +822,6 @@ static String htmlPage(){
 *{box-sizing:border-box}html{background:#000;color-scheme:dark}
 body{margin:0;background:#000;color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;-webkit-font-smoothing:antialiased;padding-bottom:94px}
 button,input,select{font:inherit}button{touch-action:manipulation}
-
 .small{font-size:12px;color:var(--muted);line-height:1.45}
 .chip{display:inline-flex;align-items:center;gap:7px;padding:7px 11px;border:1px solid var(--line2);border-radius:999px;background:var(--surface2);font-size:10px;font-weight:800;letter-spacing:.055em;text-transform:uppercase;color:#ddd;white-space:nowrap}
 .chip:before{content:"";width:6px;height:6px;border-radius:50%;background:#777}.chip.ok{color:var(--good);border-color:rgba(185,246,197,.18)}.chip.ok:before{background:var(--good)}.chip.bad{color:var(--bad);border-color:rgba(255,180,171,.2)}.chip.bad:before{background:var(--bad)}.chip.connecting{color:var(--accent);border-color:rgba(159,197,255,.2)}.chip.connecting:before{background:var(--accent)}
@@ -725,8 +830,7 @@ main{max-width:760px;margin:auto;padding:18px 14px}.tab{display:none}.tab.active
 .card{background:linear-gradient(180deg,#0b0b0b,#070707);border:1px solid rgba(255,255,255,.18);border-radius:var(--radius);padding:18px;margin-bottom:12px;box-shadow:0 0 0 1px rgba(255,255,255,.10),0 0 22px rgba(255,255,255,.085),0 12px 28px rgba(0,0,0,.28),inset 0 1px 0 rgba(255,255,255,.06);position:relative;overflow:hidden}.card:before{content:"";position:absolute;inset:0;border-radius:inherit;pointer-events:none;background:linear-gradient(135deg,rgba(255,255,255,.022),transparent 42%,rgba(255,255,255,.008));}
 .card.tight{padding:14px}.section-title{display:flex;align-items:center;justify-content:space-between;gap:10px;margin-bottom:13px}
 h2{font-size:17px;margin:0;font-weight:720;letter-spacing:-.015em}h3{font-size:14px;margin:0;font-weight:680}
-.hero{font-size:31px;font-weight:800;letter-spacing:-.04em;margin:5px 0 7px;line-height:1.08}.hero::first-letter{}.muted{color:var(--muted)}
-.format-line{font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.01em}.info-strip{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:11px 13px;border:1px solid var(--line);border-radius:14px;background:#090909;font-size:12px;color:var(--muted)}.info-strip strong{color:#e9e9e9;font-size:13px}.row{display:flex;justify-content:space-between;align-items:center;gap:14px;min-height:40px;border-bottom:1px solid var(--line);padding:8px 0}.row:last-child{border-bottom:0}
+.hero{font-size:31px;font-weight:800;letter-spacing:-.04em;margin:5px 0 7px;line-height:1.08}.format-line{font-size:13px;color:var(--muted);font-weight:600;letter-spacing:.01em}.info-strip{display:flex;justify-content:space-between;align-items:center;margin-top:16px;padding:11px 13px;border:1px solid var(--line);border-radius:14px;background:#090909;font-size:12px;color:var(--muted)}.info-strip strong{color:#e9e9e9;font-size:13px}.row{display:flex;justify-content:space-between;align-items:center;gap:14px;min-height:40px;border-bottom:1px solid var(--line);padding:8px 0}.row:last-child{border-bottom:0}
 .label{color:var(--muted)}.value{text-align:right;max-width:62%;overflow-wrap:anywhere}
 .meter{height:6px;background:#171717;border-radius:99px;overflow:hidden;margin:16px 0 8px}.meter i{display:block;height:100%;width:0;background:#fff;border-radius:inherit;transition:none}
 .buttons{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}
@@ -859,7 +963,7 @@ static void setupWebServer(){
   server.on("/api/stream/start",HTTP_POST,[]{ if(!requirePost())return; startStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/stop",HTTP_POST,[]{ if(!requirePost())return; stopStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/reconnect",HTTP_POST,[]{ if(!requirePost())return; reconnectStreaming(); sendJson(200,"{\"ok\":true}"); });
-  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; WiFi.disconnect(false,false); stopStreamClient(); mdnsStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
+  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; WiFi.disconnect(false,false); stopStreamClient(); mdnsStarted=false; tcpPushServerStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/clear-stats",HTTP_POST,[]{ if(!requirePost())return; stats=RuntimeStats(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/reboot",HTTP_POST,[]{ if(!requirePost())return; sendJson(200,"{\"ok\":true,\"message\":\"Restarting\"}"); delay(250); ESP.restart(); });
   server.on("/api/system/factory-reset",HTTP_POST,[]{ if(!requirePost())return; resetSettings(); sendJson(200,"{\"ok\":true,\"message\":\"Reset; restarting\"}"); delay(250); ESP.restart(); });
@@ -872,7 +976,7 @@ void setup(){
   Serial.begin(115200); delay(400);
   Serial.println(); Serial.println("============================================================");
   Serial.printf("%s v%s\n",DEVICE_NAME,FIRMWARE_VERSION);
-  Serial.println("Raw PCM Wi-Fi receiver — TCP primary / HTTP WAV fallback");
+  Serial.println("Direct Push + Outbound TCP/HTTP (16/24-bit 44.1k/48k)");
   Serial.println("============================================================");
   loadSettings();
   audioDataSemaphore=xSemaphoreCreateBinary();
@@ -891,6 +995,7 @@ void loop(){
   server.handleClient();
   if (WiFi.status()!=WL_CONNECTED){
     mdnsStarted=false;
+    tcpPushServerStarted=false;
     if (receiverState!=RX_WIFI_OFFLINE&&receiverState!=RX_WIFI_CONNECTING&&receiverState!=RX_UPDATING&&settings.streamEnabled){
       Serial.printf("[WIFI] Disconnected (status=%d)\n",(int)WiFi.status());
       setReceiverState(RX_WIFI_OFFLINE);
