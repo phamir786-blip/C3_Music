@@ -585,7 +585,7 @@ static bool readTcpFormatHeader() {
 
 static bool connectRawTcp() {
   setReceiverState(RX_CONNECTING);
-  streamFormat.sampleRate=DEFAULT_SAMPLE_RATE; streamFormat.channels=DEFAULT_CHANNELS; streamFormat.bitsPerSample=DEFAULT_BITS_PER_SAMPLE; streamFormat.audioFormat=1; streamFormat.valid=true;
+  streamFormat.sampleRate=0; streamFormat.channels=0; streamFormat.bitsPerSample=0; streamFormat.audioFormat=1; streamFormat.valid=false;
   Serial.printf("[TCP] Connecting to %s:%u\n",settings.phoneHost.c_str(),settings.tcpPort);
   if (!connectStreamHost(settings.tcpPort)){ stats.lastError="TCP host unavailable"; return false; }
   streamClient.setNoDelay(true);
@@ -601,7 +601,9 @@ static bool connectRawTcp() {
 }
 
 static bool connectHttpWav() {
-  setReceiverState(RX_CONNECTING); stats.lastHttpStatus=0;
+  setReceiverState(RX_CONNECTING);
+  streamFormat.sampleRate=0; streamFormat.channels=0; streamFormat.bitsPerSample=0; streamFormat.audioFormat=1; streamFormat.valid=false;
+  stats.lastHttpStatus=0;
   Serial.printf("[HTTP] Connecting to http://%s:%u/\n",settings.phoneHost.c_str(),settings.httpPort);
   if (!connectStreamHost(settings.httpPort)){ stats.lastError="HTTP host unavailable"; return false; }
   streamClient.setNoDelay(true);
@@ -782,13 +784,21 @@ static void streamTask(void*) {
 }
 
 static void startStreaming(){
-  stopRequested=false; settings.streamEnabled=true; lastStreamAttemptMs=0; saveSettings(); setReceiverState(RX_IDLE);
+  stopRequested=false;
+  streamFormat.valid=false;
+  streamFormat.sampleRate=0; streamFormat.channels=0; streamFormat.bitsPerSample=0;
+  settings.streamEnabled=true; lastStreamAttemptMs=0; saveSettings(); setReceiverState(RX_IDLE);
 }
 static void stopStreaming(){
-  stopRequested=true; settings.streamEnabled=false; saveSettings(); stopStreamClient(); ringClear(); endI2S(); setReceiverState(RX_STOPPED);
+  stopRequested=true; settings.streamEnabled=false;
+  streamFormat.valid=false;
+  streamFormat.sampleRate=0; streamFormat.channels=0; streamFormat.bitsPerSample=0;
+  saveSettings(); stopStreamClient(); ringClear(); endI2S(); setReceiverState(RX_STOPPED);
 }
 static void reconnectStreaming(){
   stopRequested=true; stopStreamClient(); ringClear(); endI2S(); delay(100);
+  streamFormat.valid=false;
+  streamFormat.sampleRate=0; streamFormat.channels=0; streamFormat.bitsPerSample=0;
   stopRequested=false; settings.streamEnabled=true; lastStreamAttemptMs=0; saveSettings(); setReceiverState(RX_IDLE);
 }
 
@@ -815,9 +825,10 @@ static String makeStatusJson(){
   r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
-  r+="\"sampleRate\":"+String(streamFormat.sampleRate)+",";
-  r+="\"channels\":"+String(streamFormat.channels)+",";
-  r+="\"bits\":"+String(streamFormat.bitsPerSample)+",";
+  r+="\"formatValid\":"+String(streamFormat.valid?"true":"false")+",";
+  r+="\"sampleRate\":"+String(streamFormat.valid?streamFormat.sampleRate:0)+",";
+  r+="\"channels\":"+String(streamFormat.valid?streamFormat.channels:0)+",";
+  r+="\"bits\":"+String(streamFormat.valid?streamFormat.bitsPerSample:0)+",";
   r+="\"volume\":"+String(settings.volumePercent)+",";
   r+="\"bufferBytes\":"+String((uint32_t)ringSize())+",";
   r+="\"bufferPercent\":"+String(ringPercent())+",";
@@ -1257,7 +1268,10 @@ function setupDropdown(){
  document.addEventListener('click',e=>{if(!wrap.contains(e.target))wrap.classList.remove('open')});sync()
 }
 function apply(d){
- text('state',d.state||'—');text('deviceStatus',d.state||'—');text('format',(d.sampleRate||0)+' Hz · '+(d.bits||0)+'-bit · '+(d.channels===2?'Stereo':'Mono'));text('mode',d.mode||'—');text('host',(d.host||'—')+' · '+(d.mode==='HTTP WAV'?d.httpPort:d.tcpPort));text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');
+ text('state',d.state||'—');text('deviceStatus',d.state||'—');
+ const formatActive=!!d.formatValid && (d.state==='Buffering'||d.state==='Streaming');
+ text('format',formatActive?((d.sampleRate||0)+' Hz · '+(d.bits||0)+'-bit · '+(d.channels===2?'Stereo':'Mono')):'—');
+ text('mode',d.mode||'—');text('host',(d.host||'—')+' · '+(d.mode==='HTTP WAV'?d.httpPort:d.tcpPort));text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');
  const vol=Math.max(0,Math.min(100,Number(d.volume??50)||0)),vi=$('volumeInput');if(vi&&document.activeElement!==vi){vi.value=vol;updateVolumeUI(vol)}
  text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?(d.rssi+' dBm'):'—');text('version',d.version||'—');text('heap',d.heap?(Math.round(d.heap/1024)+' KB'):'—');text('cpuTemp',d.cpuTemp!==undefined&&d.cpuTemp!==null?(Number(d.cpuTemp).toFixed(1)+' °C'):'—');
  const p=Number(d.bufferPercent||0);text('bufferText',p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('deviceStatus');c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Stopped'||d.state==='Error'||d.state==='WiFi offline'?'bad':(d.state==='Connecting'?'connecting':'')))
