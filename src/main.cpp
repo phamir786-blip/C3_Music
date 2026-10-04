@@ -259,7 +259,7 @@ static void displayUpdate() {
   if (!oledAvailable || !settings.oledEnabled) return;
 
   // Streaming rule: completely deactivate the OLED while audio is streaming.
-  // This removes OLED redraw/I2C activity from the real-time audio path.
+  // It remains deactivated after streaming ends until the web app explicitly enables it.
   if (receiverState == RX_STREAMING) {
     if (!oledStreamingDisabled) {
       oled.setPowerSave(1);
@@ -269,14 +269,8 @@ static void displayUpdate() {
     return;
   }
 
-  // Restore the OLED as soon as streaming stops or leaves the streaming state.
-  if (oledStreamingDisabled) {
-    oled.setPowerSave(0);
-    oled.clearBuffer();
-    oled.sendBuffer();
-    oledStreamingDisabled = false;
-    Serial.println("[OLED] Reactivated");
-  }
+  // Do not automatically reactivate the OLED after streaming.
+  if (oledStreamingDisabled) return;
 
   if (millis() - lastOledRefreshMs < OLED_REFRESH_MS) return;
   lastOledRefreshMs = millis();
@@ -981,7 +975,17 @@ static void setupWebServer(){
     settings.preferredMode=(server.arg("mode")=="http")?STREAM_MODE_HTTP:STREAM_MODE_TCP;
     uint32_t bm=server.arg("bufferMs").toInt(); if (bm<80||bm>700){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid buffer\"}"); return; }
     settings.autoFallback=(server.arg("autoFallback")=="1"); settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.oledEnabled=(server.arg("oled")=="1"); settings.targetBufferMs=(uint16_t)bm;
-    if (oledAvailable) oled.setPowerSave(settings.oledEnabled?0:1);
+    if (oledAvailable) {
+      if (settings.oledEnabled) {
+        oledStreamingDisabled = false;
+        oled.setPowerSave(0);
+        oled.clearBuffer();
+        oled.sendBuffer();
+      } else {
+        oledStreamingDisabled = false;
+        oled.setPowerSave(1);
+      }
+    }
     saveSettings(); reconnectStreaming(); sendJson(200,"{\"ok\":true}");
   });
   server.on("/api/volume",HTTP_POST,[]{
