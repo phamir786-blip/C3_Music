@@ -736,7 +736,7 @@ static String makeStatusJson(){
   r+="\"tcpPort\":"+String(settings.tcpPort)+",";
   r+="\"httpPort\":"+String(settings.httpPort)+",";
   r+="\"formatValid\":"+String(streamFormat.valid?"true":"false")+",";
-  r+="\"sampleRate\":"+String(streamFormat.valid?streamFormat.sampleRate:0)+",");
+  r+="\"sampleRate\":"+String(streamFormat.valid?streamFormat.sampleRate:0)+",";
   r+="\"channels\":"+String(streamFormat.valid?streamFormat.channels:0)+",";
   r+="\"bits\":"+String(streamFormat.valid?streamFormat.bitsPerSample:0)+",";
   r+="\"bufferBytes\":"+String((uint32_t)ringSize())+",";
