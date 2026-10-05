@@ -297,8 +297,7 @@ static void displayUpdate() {
     displayLineCenter(buf, 19, u8g2_font_6x10_tf);
     snprintf(buf, sizeof(buf), "BUF %u%%", ringPercent());
     displayLineCenter(buf, 29, u8g2_font_4x6_tf);
-    oled.drawFrame(0,33,OLED_WIDTH,7);    uint8_t w = (uint8_t)(((OLED_WIDTH-2)*ringPercent())/100);
-    if (w>0) oled.drawBox(1,34,w,5);
+    oled.drawFrame(0,33,OLED_WIDTH,7);    uint8_t w = (uint8_t)(((OLED_WIDTH-2)*ringPercent())/100);    if (w>0) oled.drawBox(1,34,w,5);
   } else {
     String msg;
     if (WiFi.status()==WL_CONNECTED) msg = WiFi.localIP().toString();
@@ -597,7 +596,6 @@ static bool connectRawTcp() {
 
   if (!beginI2S(streamFormat.sampleRate,streamFormat.channels,streamFormat.bitsPerSample)){ stats.lastError="I2S setup failed"; streamClient.stop(); return false; }
   return true;}
-
 static bool connectHttpWav() {
   setReceiverState(RX_CONNECTING);
   streamFormat.sampleRate=0; streamFormat.channels=0; streamFormat.bitsPerSample=0; streamFormat.audioFormat=1; streamFormat.valid=false;
@@ -897,8 +895,7 @@ button.action{min-height:44px;border:1px solid transparent;border-radius:14px;pa
 button.action:hover{box-shadow:0 0 0 1px rgba(255,255,255,.12),0 8px 22px rgba(255,255,255,.05)}button.action:active{transform:scale(.97)}
 button.secondary{background:#0d0d0d;color:#eee;border-color:var(--line2)}button.danger{background:#160b0a;color:#ffb4ab;border-color:rgba(255,180,171,.25)}button:disabled{opacity:.48;cursor:not-allowed}
 .field{margin:16px 0}.field label{display:block;color:var(--muted);font-size:12px;margin:0 0 8px 2px}
-input[type=text],input[type=number]{width:100%;height:46px;border:1px solid var(--line2);outline:none;background:#090909;color:var(--text);border-radius:14px;padding:0 13px;transition:border-color .16s ease,box-shadow .16s ease}
-input[type=text]:focus,input[type=number]:focus{border-color:rgba(255,255,255,.35);box-shadow:0 0 0 3px rgba(255,255,255,.06)}
+input[type=text],input[type=number]{width:100%;height:46px;border:1px solid var(--line2);outline:none;background:#090909;color:var(--text);border-radius:14px;padding:0 13px;transition:border-color .16s ease,box-shadow .16s ease}input[type=text]:focus,input[type=number]:focus{border-color:rgba(255,255,255,.35);box-shadow:0 0 0 3px rgba(255,255,255,.06)}
 input[type=range]{--volume:50%;width:100%;height:34px;margin:2px 0;appearance:none;background:transparent;accent-color:#fff;cursor:pointer}
 input[type=range]::-webkit-slider-runnable-track{height:7px;background:linear-gradient(90deg,rgba(255,255,255,.82) 0,var(--volume),rgba(255,255,255,.13) var(--volume),rgba(255,255,255,.13) 100%);border:1px solid rgba(255,255,255,.09);border-radius:99px;box-shadow:inset 0 1px 2px rgba(0,0,0,.55),0 0 8px rgba(255,255,255,.035)}
 input[type=range]::-webkit-slider-thumb{appearance:none;width:24px;height:24px;border-radius:50%;background:#fff;margin-top:-9.5px;border:2px solid #000;box-shadow:0 2px 12px rgba(255,255,255,.18),0 0 0 3px rgba(255,255,255,.04);transition:transform .12s ease,box-shadow .12s ease}
@@ -1197,8 +1194,7 @@ nav .nav-inner button.active:after{
 }#toast{
   bottom:96px;
   border:1px solid rgba(255,255,255,.12);
-  background:rgba(241,241,243,.97);
-  box-shadow:0 16px 34px rgba(0,0,0,.48);
+  background:rgba(241,241,243,.97);  box-shadow:0 16px 34px rgba(0,0,0,.48);
   backdrop-filter:blur(14px);
 }
 .small{
