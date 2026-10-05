@@ -868,8 +868,7 @@ static String makeConfigJson(){
 static void sendJson(int code, const String &body){ server.sendHeader("Cache-Control","no-store,no-cache,must-revalidate,max-age=0"); server.sendHeader("Pragma","no-cache"); server.send(code,"application/json",body); }
 static bool requirePost(){ if (server.method()!=HTTP_POST){ sendJson(405,"{\"ok\":false,\"error\":\"POST required\"}"); return false; } return true; }
 
-static String htmlPage(){
-  return R"HTML(<!doctype html>
+static const char HTML_PAGE[] PROGMEM = R"HTML(<!doctype html>
 <html lang="en">
 <head>
 <meta charset="utf-8">
@@ -1283,7 +1282,6 @@ async function saveCfg(){const body=new URLSearchParams({host:$('hostInput').val
 function uploadFw(){const f=$('firmware').files[0];if(!f){toast('Choose .bin first');return}if(!confirm('Install '+f.name+'?'))return;const xhr=new XMLHttpRequest(),form=new FormData();form.append('firmware',f);$('otaProg').classList.remove('hidden');$('otaProg').value=0;$('otaTxt').textContent='Uploading…';$('otaBtn').disabled=true;xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('otaProg').value=p;$('otaTxt').textContent='Uploading '+p+'%'}};xhr.onload=()=>{$('otaBtn').disabled=false;if(xhr.status===200){$('otaProg').value=100;$('otaTxt').textContent='Update accepted. Restarting…';toast('Firmware update successful')}else{$('otaTxt').textContent='Update failed: '+xhr.responseText;toast('OTA failed')}};xhr.onerror=()=>{$('otaBtn').disabled=false;$('otaTxt').textContent='Upload failed';toast('OTA failed')};xhr.open('POST','/api/ota');xhr.send(form)}
 const navButtons=Array.from(document.querySelectorAll('nav button'));const tabs=Array.from(document.querySelectorAll('.tab'));function showTab(index,direction=0){if(index<0||index>=navButtons.length)return;navButtons.forEach(x=>x.classList.remove('active'));tabs.forEach(x=>x.classList.remove('active','from-left','from-right'));const b=navButtons[index],panel=$(b.dataset.tab);b.classList.add('active');if(panel){panel.classList.add('active');if(direction<0)panel.classList.add('from-right');else if(direction>0)panel.classList.add('from-left')}window.scrollTo({top:0,behavior:'smooth'})}navButtons.forEach((b,i)=>b.onclick=()=>showTab(i,0));let swipeStartX=0,swipeStartY=0,swipeTracking=false;document.addEventListener('touchstart',e=>{if(e.touches.length!==1)return;const t=e.touches[0],target=e.target;if(target.closest('nav,button,input,select,textarea,a')){swipeTracking=false;return}swipeStartX=t.clientX;swipeStartY=t.clientY;swipeTracking=true},{passive:true});document.addEventListener('touchend',e=>{if(!swipeTracking||e.changedTouches.length!==1)return;swipeTracking=false;const t=e.changedTouches[0],dx=t.clientX-swipeStartX,dy=t.clientY-swipeStartY;if(Math.abs(dx)<55||Math.abs(dx)<Math.abs(dy)*1.35)return;const current=navButtons.findIndex(b=>b.classList.contains('active'));if(current<0)return;const next=dx<0?current+1:current-1;if(next>=0&&next<navButtons.length)showTab(next,dx<0?-1:1)},{passive:true});poll();schedulePoll();document.addEventListener('visibilitychange',schedulePoll);
 </script></body></html>)HTML";
-}
 
 static bool otaUploadFailed=false; static String otaUploadError;
 static void handleFirmwareUpload(){
@@ -1295,7 +1293,7 @@ static void handleFirmwareUpload(){
 }
 
 static void setupWebServer(){
-  server.on("/",HTTP_GET,[]{ server.sendHeader("Cache-Control","public,max-age=300,must-revalidate"); server.sendHeader("Vary","Accept-Encoding"); server.send(200,"text/html; charset=utf-8",htmlPage()); });
+  server.on("/",HTTP_GET,[]{ server.sendHeader("Cache-Control","public,max-age=300,must-revalidate"); server.sendHeader("Vary","Accept-Encoding"); server.send_P(200,PSTR("text/html; charset=utf-8"),HTML_PAGE); });
   server.on("/api/status",HTTP_GET,[]{ sendJson(200,makeStatusJson()); });
   server.on("/api/config",HTTP_GET,[]{ sendJson(200,makeConfigJson()); });
   server.on("/api/config",HTTP_POST,[]{
