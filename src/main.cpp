@@ -46,7 +46,7 @@ static constexpr uint8_t C3_PROTOCOL_VERSION = 1;
 static constexpr size_t C3_FORMAT_HEADER_BYTES = 16;
 static constexpr uint32_t TCP_FORMAT_HEADER_TIMEOUT_MS = 1000;
 
-// 128 KB Ring Buffer for zero-choppy streaming
+// 64 KB Ring Buffer for stable streaming
 static constexpr size_t AUDIO_RING_BYTES = 65536;
 static constexpr size_t NETWORK_READ_BYTES = 1460;
 static constexpr size_t I2S_WRITE_BYTES = 2048;
@@ -551,9 +551,9 @@ static bool readTcpFormatHeader() {
   const uint32_t expectedFrameSize = (uint32_t)channels * (uint32_t)(bits / 8);
 
   if (version == C3_PROTOCOL_VERSION &&
-      (bits == 16 || bits == 24) &&
+      bits == 16 &&
       (channels == 1 || channels == 2) &&
-      sampleRate >= 8000 && sampleRate <= 96000 &&
+      (sampleRate == 44100 || sampleRate == 48000) &&
       frameSize == expectedFrameSize &&
       expectedFrameSize > 0) {
     streamFormat.sampleRate = sampleRate;
@@ -651,20 +651,6 @@ static void playbackTask(void*) {
         writeBuf = playbackOut;
         writeLen = samples * 4;
       }
-    } else if (streamFormat.bitsPerSample == 24) {
-      size_t count = n / 3;
-      int32_t *dst32 = reinterpret_cast<int32_t*>(playbackOut);
-      for (size_t i = 0; i < count; ++i) {
-        size_t idx = i * 3;
-        int32_t s = (int32_t)((uint32_t)playbackIn[idx] |
-                             ((uint32_t)playbackIn[idx + 1] << 8) |
-                             ((uint32_t)playbackIn[idx + 2] << 16));
-        if (s & 0x00800000) s |= 0xFF000000;
-        if (volume < 100) s = (s * volume) / 100;
-        dst32[i] = s << 8;
-      }
-      writeBuf = playbackOut;
-      writeLen = count * 4;
     }
 
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
