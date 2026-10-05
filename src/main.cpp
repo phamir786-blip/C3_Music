@@ -47,7 +47,7 @@ static constexpr size_t C3_FORMAT_HEADER_BYTES = 16;
 static constexpr uint32_t TCP_FORMAT_HEADER_TIMEOUT_MS = 1000;
 
 // 128 KB Ring Buffer for zero-choppy streaming
-static constexpr size_t AUDIO_RING_BYTES = 131072;
+static constexpr size_t AUDIO_RING_BYTES = 65536;
 static constexpr size_t NETWORK_READ_BYTES = 1460;
 static constexpr size_t I2S_WRITE_BYTES = 2048;
 static constexpr uint32_t PREBUFFER_BYTES = 12000;
@@ -297,8 +297,7 @@ static void displayUpdate() {
     displayLineCenter(buf, 19, u8g2_font_6x10_tf);
     snprintf(buf, sizeof(buf), "BUF %u%%", ringPercent());
     displayLineCenter(buf, 29, u8g2_font_4x6_tf);
-    oled.drawFrame(0,33,OLED_WIDTH,7);
-    uint8_t w = (uint8_t)(((OLED_WIDTH-2)*ringPercent())/100);
+    oled.drawFrame(0,33,OLED_WIDTH,7);    uint8_t w = (uint8_t)(((OLED_WIDTH-2)*ringPercent())/100);
     if (w>0) oled.drawBox(1,34,w,5);
   } else {
     String msg;
@@ -368,7 +367,7 @@ static void beginMdnsIfNeeded() {
 }
 
 static bool supportedPcmFormat(const StreamFormat &f) {
-  return f.audioFormat==1 && (f.bitsPerSample==16 || f.bitsPerSample==24) && (f.channels==1||f.channels==2) && f.sampleRate>=8000 && f.sampleRate<=96000;
+  return f.audioFormat==1 && f.bitsPerSample==16 && (f.channels==1||f.channels==2) && (f.sampleRate==44100 || f.sampleRate==48000);
 }
 
 static void endI2S() {
@@ -397,12 +396,12 @@ static void stopStreamClient() {
 }
 
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
-  if ((bits!=16 && bits!=24) || (ch!=1 && ch!=2)) return false;
+  if (bits!=16 || (ch!=1 && ch!=2)) return false;
   
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
   if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
 
-  i2s_bits_per_sample_t bps = (bits == 24) ? I2S_BITS_PER_SAMPLE_32BIT : I2S_BITS_PER_SAMPLE_16BIT;
+  i2s_bits_per_sample_t bps = I2S_BITS_PER_SAMPLE_16BIT;
 
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
@@ -411,8 +410,8 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 16,        // 16 buffers = deep jitter cushion
-    .dma_buf_len = 512,
+    .dma_buf_count = 4,
+    .dma_buf_len = 1024,
     .use_apll = false,          // ESP32-C3 does NOT support APLL!
     .tx_desc_auto_clear = true,  // Automatically clears DMA buffer on underrun
     .fixed_mclk = 0             // Must be 0!
@@ -597,8 +596,7 @@ static bool connectRawTcp() {
   }
 
   if (!beginI2S(streamFormat.sampleRate,streamFormat.channels,streamFormat.bitsPerSample)){ stats.lastError="I2S setup failed"; streamClient.stop(); return false; }
-  return true;
-}
+  return true;}
 
 static bool connectHttpWav() {
   setReceiverState(RX_CONNECTING);
@@ -897,8 +895,7 @@ h2{font-size:17px;margin:0;font-weight:720;letter-spacing:-.015em}h3{font-size:1
 .buttons{display:flex;flex-wrap:wrap;gap:9px;margin-top:14px}
 button.action{min-height:44px;border:1px solid transparent;border-radius:14px;padding:10px 15px;background:#fff;color:#000;font-weight:750;cursor:pointer;transition:transform .16s ease,background .16s ease,border-color .16s ease,box-shadow .16s ease}
 button.action:hover{box-shadow:0 0 0 1px rgba(255,255,255,.12),0 8px 22px rgba(255,255,255,.05)}button.action:active{transform:scale(.97)}
-button.secondary{background:#0d0d0d;color:#eee;border-color:var(--line2)}button.danger{background:#160b0a;color:#ffb4ab;border-color:rgba(255,180,171,.25)}
-button:disabled{opacity:.48;cursor:not-allowed}
+button.secondary{background:#0d0d0d;color:#eee;border-color:var(--line2)}button.danger{background:#160b0a;color:#ffb4ab;border-color:rgba(255,180,171,.25)}button:disabled{opacity:.48;cursor:not-allowed}
 .field{margin:16px 0}.field label{display:block;color:var(--muted);font-size:12px;margin:0 0 8px 2px}
 input[type=text],input[type=number]{width:100%;height:46px;border:1px solid var(--line2);outline:none;background:#090909;color:var(--text);border-radius:14px;padding:0 13px;transition:border-color .16s ease,box-shadow .16s ease}
 input[type=text]:focus,input[type=number]:focus{border-color:rgba(255,255,255,.35);box-shadow:0 0 0 3px rgba(255,255,255,.06)}
@@ -1197,8 +1194,7 @@ nav .nav-inner button.active:after{
   height:2px;
   background:#c4d7ff;
   box-shadow:0 0 10px rgba(196,215,255,.25);
-}
-#toast{
+}#toast{
   bottom:96px;
   border:1px solid rgba(255,255,255,.12);
   background:rgba(241,241,243,.97);
