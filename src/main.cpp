@@ -20,8 +20,6 @@
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
-static const char PHONE_HOST[] = "192.168.254.119";
-
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3music";
 static const char FIRMWARE_VERSION[] = "2.0.0";
@@ -74,7 +72,6 @@ struct RuntimeStats {
 };
 
 struct Settings {
-  String phoneHost;
   uint16_t udpPort = UDP_DEFAULT_PORT;
   bool autoReconnect = true, oledEnabled = true, streamEnabled = true;
   uint16_t targetBufferMs = 250;
@@ -107,7 +104,6 @@ static bool mdnsStarted = false;
 
 static void loadSettings() {
   preferences.begin("c3music", false);
-  settings.phoneHost = preferences.getString("host", PHONE_HOST);
   settings.udpPort = preferences.getUShort("udpport", UDP_DEFAULT_PORT);
   settings.autoReconnect = preferences.getBool("autorecon", true);
   settings.oledEnabled = preferences.getBool("oled", true);
@@ -115,14 +111,12 @@ static void loadSettings() {
   settings.targetBufferMs = preferences.getUShort("buffer", 250);
   settings.volumePercent = preferences.getUChar("volume", 50);
   if (settings.volumePercent > 100) settings.volumePercent = 100;
-  if (settings.phoneHost.length() == 0) settings.phoneHost = PHONE_HOST;
   if (settings.udpPort == 0) settings.udpPort = UDP_DEFAULT_PORT;
   if (settings.targetBufferMs < 80) settings.targetBufferMs = 80;
   if (settings.targetBufferMs > 700) settings.targetBufferMs = 700;
 }
 
 static void saveSettings() {
-  preferences.putString("host", settings.phoneHost);
   preferences.putUShort("udpport", settings.udpPort);
   preferences.putBool("autorecon", settings.autoReconnect);
   preferences.putBool("oled", settings.oledEnabled);
@@ -133,7 +127,6 @@ static void saveSettings() {
 
 static void resetSettings() {
   preferences.clear(); preferences.end();
-  settings.phoneHost = PHONE_HOST;
   settings.udpPort = UDP_DEFAULT_PORT;
   settings.autoReconnect = true;
   settings.oledEnabled = true; settings.streamEnabled = true;
@@ -605,7 +598,6 @@ static String makeStatusJson(){
   r+="\"ip\":\""+jsonEscape(ip)+"\",";
   r+="\"hostname\":\""+String(MDNS_HOSTNAME)+".local\",";
   r+="\"rssi\":"+String(rssi)+",";
-  r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
   r+="\"udpPort\":"+String(settings.udpPort)+",";
   r+="\"formatValid\":"+String(streamFormat.valid?"true":"false")+",";
   r+="\"sampleRate\":"+String(streamFormat.valid?streamFormat.sampleRate:0)+",";
