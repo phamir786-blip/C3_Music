@@ -517,13 +517,7 @@ static void streamTask(void*) {
               beginI2S(streamFormat.sampleRate, streamFormat.channels, streamFormat.bitsPerSample);
             }
           } else if (!streamFormat.valid) {
-            // Default raw PCM fallback
-            streamFormat.sampleRate = DEFAULT_SAMPLE_RATE;
-            streamFormat.channels = DEFAULT_CHANNELS;
-            streamFormat.bitsPerSample = DEFAULT_BITS_PER_SAMPLE;
-            streamFormat.audioFormat = 1;
-            streamFormat.valid = true;
-            if (!i2sReady) beginI2S(streamFormat.sampleRate, streamFormat.channels, streamFormat.bitsPerSample);
+            Serial.println("[UDP] Waiting for valid C3MS format header");
           }
         }
 
