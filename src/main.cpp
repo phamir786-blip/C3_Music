@@ -624,7 +624,6 @@ static String makeStatusJson(){
 static String makeConfigJson(){
   String r; r.reserve(450);
   r+="{";
-  r+="\"host\":\""+jsonEscape(settings.phoneHost)+"\",";
   r+="\"udpPort\":"+String(settings.udpPort)+",";
   r+="\"autoReconnect\":"+String(settings.autoReconnect?"true":"false")+",";
   r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
