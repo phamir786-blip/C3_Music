@@ -690,6 +690,28 @@ nav .nav-inner button svg{width:30px;height:30px;fill:none;stroke:currentColor;s
 .main-actions button.action{flex:1;min-width:0}.main-actions .icon-action{display:flex;align-items:center;justify-content:center;gap:0;padding:10px}.main-actions .icon-action svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.main-actions .icon-action:first-child svg{fill:currentColor;stroke:none;width:24px;height:24px}#toast{position:fixed;z-index:80;left:50%;bottom:96px;transform:translate(-50%,14px);opacity:0;pointer-events:none;background:rgba(241,241,243,.97);color:#050505;border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:11px 15px;font-size:13px;font-weight:700;box-shadow:0 16px 34px rgba(0,0,0,.48);backdrop-filter:blur(14px);transition:opacity .18s ease,transform .18s ease}
 #toast.show{opacity:1;transform:translate(-50%,0)}.hidden{display:none!important}
 .settings-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;color:var(--muted);flex:0 0 20px}.settings-icon svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}
+/* C3 Music typography system — S3-inspired, adapted for C3 */
+:root{--font-ui:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--fs-body:13px;--fs-small:12px;--fs-label:12px;--fs-value:12px;--fs-control:12px;--fs-section:17px;--fs-subsection:14px;--fs-hero:31px;--fw-regular:500;--fw-medium:600;--fw-section:720;--fw-control:700;--fw-strong:760;--fw-hero:800}
+body,button,input,select,textarea{font-family:var(--font-ui);font-synthesis:none}
+body{font-size:var(--fs-body);font-weight:var(--fw-regular);line-height:1.45;letter-spacing:0}
+h2{font-size:var(--fs-section);font-weight:var(--fw-section);line-height:1.2;letter-spacing:-.015em}
+h3{font-size:var(--fs-subsection);font-weight:var(--fw-section);line-height:1.25;letter-spacing:-.005em}
+.hero{font-size:var(--fs-hero);font-weight:var(--fw-hero);line-height:1.08;letter-spacing:-.04em}
+.small,.settings-intro{font-size:var(--fs-small);font-weight:var(--fw-regular);line-height:1.45}
+.label,.field label{font-size:var(--fs-label);font-weight:var(--fw-medium);line-height:1.35}
+.value{font-size:var(--fs-value);font-weight:var(--fw-medium);line-height:1.35}
+.format-line{font-size:var(--fs-body);font-weight:var(--fw-medium);line-height:1.35;letter-spacing:.01em}
+.info-strip{font-size:var(--fs-small);font-weight:var(--fw-regular)}.info-strip strong{font-size:var(--fs-body);font-weight:var(--fw-strong)}
+.stat .k{font-size:10px;font-weight:var(--fw-medium);letter-spacing:.05em}.stat .v{font-size:18px;font-weight:var(--fw-strong);line-height:1.15;letter-spacing:-.02em}
+.chip{font-size:10px;font-weight:800;letter-spacing:.055em}
+button.action,.mute-btn,.file::file-selector-button,.select-option{font-size:var(--fs-control);font-weight:var(--fw-control);line-height:1.2}
+.field{font-size:var(--fs-body)}
+.switchrow>span{font-size:var(--fs-body);font-weight:var(--fw-medium);line-height:1.35}
+.select-button{font-size:var(--fs-body);font-weight:var(--fw-medium)}
+.slider-value{font-size:20px;font-weight:var(--fw-hero);line-height:1;letter-spacing:-.03em}
+#toast{font-size:var(--fs-body);font-weight:var(--fw-control);line-height:1.3}
+.wifi-actions{flex-wrap:nowrap;gap:8px}.wifi-actions button.action{flex:1 1 0;min-width:0;min-height:40px;padding:8px 10px;font-size:11.5px;font-weight:var(--fw-control);border-radius:13px}
+@media(max-width:360px){.wifi-actions{gap:6px}.wifi-actions button.action{padding-left:7px;padding-right:7px;font-size:11px}}
 </style>
 </head>
 <body>
@@ -701,7 +723,7 @@ nav .nav-inner button svg{width:30px;height:30px;fill:none;stroke:currentColor;s
 <div class="card"><div class="section-title"><h2>Stream</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div><div class="row"><span class="label">Transport</span><span class="value" id="mode">UDP Stream</span></div><div class="row"><span class="label">Listening Port</span><span class="value" id="portDisplay">50005</span></div><div class="row"><span class="label">Session</span><span class="value" id="session">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Audio health</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-4 3 8 2-4h7"/></svg></span></div><div class="status-grid"><div class="stat"><div class="k">Underruns</div><div class="v" id="underruns">0</div></div><div class="stat"><div class="k">Reconnects</div><div class="v" id="reconnects">0</div></div></div><div class="row" style="margin-top:8px"><span class="label">Last error</span><span class="value" id="lastError">None</span></div></div>
 </section>
-<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons"><button class="action" onclick="act('/api/wifi/disconnect')">Disconnect Wi‑Fi</button><button class="action secondary" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
+<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons wifi-actions"><button class="action" onclick="act('/api/wifi/disconnect')">Disconnect Wi‑Fi</button><button class="action secondary" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
 <section class="tab" id="settings">
 <div class="settings-intro"><strong>Settings</strong> · UDP connection, buffer, OLED and system controls</div>
 <div class="card"><div class="section-title"><h2>Stream settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div>
