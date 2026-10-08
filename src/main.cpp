@@ -101,6 +101,7 @@ static SemaphoreHandle_t udpMux = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr, playbackTaskHandle = nullptr;
 static uint32_t lastWifiAttemptMs = 0, lastOledRefreshMs = 0, lastStatusRefreshMs = 0;
 static bool mdnsStarted = false;
+static volatile bool wifiManualDisconnect = false;
 
 static void loadSettings() {
   preferences.begin("c3music", false);
@@ -281,6 +282,7 @@ static void displayUpdate() {
 static void beginMdnsIfNeeded();
 
 static void connectWifiIfNeeded() {
+  if (wifiManualDisconnect) return;
   if (WiFi.status()==WL_CONNECTED) { beginMdnsIfNeeded(); return; }
   if (millis()-lastWifiAttemptMs < WIFI_RETRY_MS) return;
   lastWifiAttemptMs = millis();
@@ -665,7 +667,7 @@ h2{font-size:16px;margin:0;font-weight:720;letter-spacing:-.018em}h3{font-size:1
 .buttons{display:flex;flex-wrap:wrap;gap:10px;margin-top:14px}
 button.action{min-height:46px;border:1px solid transparent;border-radius:15px;padding:10px 16px;background:linear-gradient(180deg,#fff,#ededee);color:#000;font-weight:750;cursor:pointer;transition:transform .16s ease,background .16s ease,box-shadow .16s ease;box-shadow:0 7px 20px rgba(0,0,0,.28)}
 button.action:hover{transform:translateY(-1px);box-shadow:0 10px 24px rgba(0,0,0,.34),0 0 0 1px rgba(255,255,255,.08)}button.action:active{transform:scale(.97)}
-button.secondary{background:linear-gradient(180deg,#141416,#0d0d0e);color:#eee;border-color:rgba(255,255,255,.13)}button.danger{background:linear-gradient(180deg,#1a100f,#120908);color:#ffb4ab;border-color:rgba(255,180,171,.25)}button:disabled{opacity:.48;cursor:not-allowed}
+button.secondary{background:linear-gradient(180deg,#141416,#0d0d0e);color:#eee;border-color:rgba(255,255,255,.13)}button.danger{background:linear-gradient(180deg,#1a100f,#120908);color:#ffb4ab;border-color:rgba(255,180,171,.25)}#settings .card:last-child .buttons{flex-wrap:nowrap;gap:7px}#settings .card:last-child .buttons button.action{flex:1;min-width:0;min-height:42px;padding:8px 8px;font-size:12px}button:disabled{opacity:.48;cursor:not-allowed}
 .field{margin:18px 0}.field label{display:block;color:var(--muted);font-size:11px;letter-spacing:.045em;text-transform:uppercase;margin:0 0 8px 2px}
 input[type=text],input[type=number]{width:100%;height:48px;border:1px solid rgba(255,255,255,.13);outline:none;background:rgba(255,255,255,.02);color:var(--text);border-radius:15px;padding:0 13px;transition:border-color .16s ease,box-shadow .16s ease}input[type=text]:focus,input[type=number]:focus{border-color:rgba(185,210,255,.42);box-shadow:0 0 0 4px rgba(185,210,255,.055)}
 input[type=range]{--volume:50%;width:100%;height:38px;margin:2px 0;appearance:none;background:transparent;accent-color:#fff;cursor:pointer}
@@ -684,8 +686,8 @@ nav{position:fixed;z-index:40;bottom:0;left:0;right:0;display:flex;justify-conte
 nav .nav-inner{width:min(540px,100%);display:flex;gap:7px}nav button{flex:1;min-height:50px;border:0;border-radius:16px;background:transparent;color:#777;font-weight:700;cursor:pointer;display:flex;align-items:center;justify-content:center;position:relative;transition:background .16s ease,color .16s ease}
 nav button.active{background:linear-gradient(180deg,#18181b,#111113);color:#fff;box-shadow:inset 0 0 0 1px rgba(255,255,255,.075),0 6px 18px rgba(0,0,0,.22)}
 nav .nav-inner button.active:after{content:"";position:absolute;bottom:5px;width:20px;height:2px;border-radius:2px;background:#c4d7ff;box-shadow:0 0 10px rgba(196,215,255,.25)}
-nav .nav-inner button svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}nav .nav-inner button:first-child svg{fill:currentColor;stroke:none;width:18px;height:18px}
-#toast{position:fixed;z-index:80;left:50%;bottom:96px;transform:translate(-50%,14px);opacity:0;pointer-events:none;background:rgba(241,241,243,.97);color:#050505;border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:11px 15px;font-size:13px;font-weight:700;box-shadow:0 16px 34px rgba(0,0,0,.48);backdrop-filter:blur(14px);transition:opacity .18s ease,transform .18s ease}
+nav .nav-inner button svg{width:30px;height:30px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}nav .nav-inner button:first-child svg{fill:currentColor;stroke:none;width:27px;height:27px}
+.main-actions button.action{flex:1;min-width:0}#toast{position:fixed;z-index:80;left:50%;bottom:96px;transform:translate(-50%,14px);opacity:0;pointer-events:none;background:rgba(241,241,243,.97);color:#050505;border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:11px 15px;font-size:13px;font-weight:700;box-shadow:0 16px 34px rgba(0,0,0,.48);backdrop-filter:blur(14px);transition:opacity .18s ease,transform .18s ease}
 #toast.show{opacity:1;transform:translate(-50%,0)}.hidden{display:none!important}
 .settings-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;color:var(--muted);flex:0 0 20px}.settings-icon svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}
 </style>
@@ -695,11 +697,11 @@ nav .nav-inner button svg{width:20px;height:20px;fill:none;stroke:currentColor;s
 <section class="tab active" id="now">
 <div class="card"><div class="section-title"><h2>Now Playing</h2><span class="chip" id="deviceStatus">Loading</span></div><div class="hero" id="state">Connecting…</div><div class="format-line" id="format">Waiting for status</div><div class="info-strip"><span>Buffer</span><strong id="bufferText">—</strong></div>
 <div class="card tight" style="margin:16px 0 0"><div class="slider-head"><h3>Volume</h3><span class="slider-value" id="volumeText">50%</span></div><div class="volume-row"><input id="volumeInput" type="range" min="0" max="100" value="50" oninput="volumePreview(this.value)" onchange="setVolume(this.value)"><button type="button" class="mute-btn" id="muteBtn" onclick="toggleMute()">Mute</button></div><div class="small">Output level</div></div>
-<div class="buttons"><button class="action" onclick="act('/api/stream/start')">Start</button><button class="action secondary" onclick="act('/api/stream/stop')">Stop</button><button class="action secondary" onclick="act('/api/stream/reconnect')">Reconnect</button></div></div>
+<div class="buttons main-actions"><button class="action" onclick="act('/api/stream/start')">Start</button><button class="action secondary" onclick="act('/api/stream/stop')">Stop</button><button class="action secondary" onclick="act('/api/stream/reconnect')">Reconnect</button></div></div>
 <div class="card"><div class="section-title"><h2>Stream</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div><div class="row"><span class="label">Transport</span><span class="value" id="mode">UDP Stream</span></div><div class="row"><span class="label">Listening Port</span><span class="value" id="portDisplay">50005</span></div><div class="row"><span class="label">Session</span><span class="value" id="session">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Audio health</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-4 3 8 2-4h7"/></svg></span></div><div class="status-grid"><div class="stat"><div class="k">Underruns</div><div class="v" id="underruns">0</div></div><div class="stat"><div class="k">Reconnects</div><div class="v" id="reconnects">0</div></div></div><div class="row" style="margin-top:8px"><span class="label">Last error</span><span class="value" id="lastError">None</span></div></div>
 </section>
-<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons"><button class="action" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
+<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons"><button class="action" onclick="act('/api/wifi/disconnect')">Disconnect Wi‑Fi</button><button class="action secondary" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
 <section class="tab" id="settings">
 <div class="settings-intro"><strong>Settings</strong> · UDP connection, buffer, OLED and system controls</div>
 <div class="card"><div class="section-title"><h2>Stream settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div>
@@ -785,7 +787,8 @@ static void setupWebServer(){
   server.on("/api/stream/start",HTTP_POST,[]{ if(!requirePost())return; startStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/stop",HTTP_POST,[]{ if(!requirePost())return; stopStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/reconnect",HTTP_POST,[]{ if(!requirePost())return; reconnectStreaming(); sendJson(200,"{\"ok\":true}"); });
-  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; WiFi.disconnect(false,false); stopUdpListener(); mdnsStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
+  server.on("/api/wifi/disconnect",HTTP_POST,[]{ if(!requirePost())return; wifiManualDisconnect=true; stopUdpListener(); mdnsStarted=false; WiFi.disconnect(false,false); setReceiverState(RX_WIFI_OFFLINE,"WiFi manually disconnected"); sendJson(200,"{\"ok\":true}"); });
+  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; wifiManualDisconnect=false; WiFi.disconnect(false,false); stopUdpListener(); mdnsStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/clear-stats",HTTP_POST,[]{ if(!requirePost())return; stats=RuntimeStats(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/reboot",HTTP_POST,[]{ if(!requirePost())return; sendJson(200,"{\"ok\":true,\"message\":\"Restarting\"}"); delay(250); ESP.restart(); });
   server.on("/api/system/factory-reset",HTTP_POST,[]{ if(!requirePost())return; resetSettings(); sendJson(200,"{\"ok\":true,\"message\":\"Reset; restarting\"}"); delay(250); ESP.restart(); });
