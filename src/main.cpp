@@ -692,7 +692,7 @@ nav .nav-inner button svg{width:30px;height:30px;fill:none;stroke:currentColor;s
 :root{--font-ui:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--fs-body:13px;--fs-small:12px;--fs-label:12px;--fs-value:12px;--fs-control:12px;--fs-section:17px;--fs-subsection:14px;--fs-hero:31px;--fw-regular:500;--fw-medium:600;--fw-section:720;--fw-control:700;--fw-strong:760;--fw-hero:800}
 body,button,input,select,textarea{font-family:var(--font-ui);font-synthesis:none}
 body{font-size:var(--fs-body);font-weight:var(--fw-regular);line-height:1.45;letter-spacing:0}
-h2{font-size:var(--fs-section);font-weight:800;line-height:1.2;letter-spacing:-.015em}
+h2{font-size:var(--fs-section);font-weight:800;line-height:1.2;letter-spacing:-.015em;text-transform:uppercase}
 h3{font-size:var(--fs-subsection);font-weight:var(--fw-section);line-height:1.25;letter-spacing:-.005em}
 .hero{font-size:var(--fs-hero);font-weight:var(--fw-hero);line-height:1.08;letter-spacing:-.04em}
 .small,.settings-intro,.format-line,.label,.field label,.switchrow>span,.stat .k,.info-strip span{font-size:var(--fs-small);font-weight:var(--fw-regular);line-height:1.45;opacity:.8}
