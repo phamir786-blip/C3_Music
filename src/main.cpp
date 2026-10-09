@@ -101,7 +101,6 @@ static SemaphoreHandle_t udpMux = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr, playbackTaskHandle = nullptr;
 static uint32_t lastWifiAttemptMs = 0, lastOledRefreshMs = 0, lastStatusRefreshMs = 0;
 static bool mdnsStarted = false;
-static volatile bool wifiManualDisconnect = false;
 
 static void loadSettings() {
   preferences.begin("c3music", false);
@@ -282,7 +281,6 @@ static void displayUpdate() {
 static void beginMdnsIfNeeded();
 
 static void connectWifiIfNeeded() {
-  if (wifiManualDisconnect) return;
   if (WiFi.status()==WL_CONNECTED) { beginMdnsIfNeeded(); return; }
   if (millis()-lastWifiAttemptMs < WIFI_RETRY_MS) return;
   lastWifiAttemptMs = millis();
@@ -723,7 +721,7 @@ button.action,.mute-btn,.file::file-selector-button,.select-option{font-size:var
 <div class="card"><div class="section-title"><h2>Stream</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div><div class="row"><span class="label">Transport</span><span class="value" id="mode">UDP Stream</span></div><div class="row"><span class="label">Listening Port</span><span class="value" id="portDisplay">50005</span></div><div class="row"><span class="label">Session</span><span class="value" id="session">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Audio Health</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-4 3 8 2-4h7"/></svg></span></div><div class="status-grid"><div class="stat"><div class="k">Underruns</div><div class="v" id="underruns">0</div></div><div class="stat"><div class="k">Reconnects</div><div class="v" id="reconnects">0</div></div></div><div class="row" style="margin-top:8px"><span class="label">Last Error</span><span class="value" id="lastError">None</span></div></div>
 </section>
-<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons wifi-actions"><button class="action" onclick="act('/api/wifi/disconnect')">Disconnect Wi‑Fi</button><button class="action secondary" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
+<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons wifi-actions"><button class="action secondary" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
 <section class="tab" id="settings">
 <div class="card"><div class="section-title"><h2>Stream Settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div>
 <div class="field"><label>UDP Listening Port</label><input id="udpInput" type="number" min="1" max="65535" value="50005"></div>
@@ -808,8 +806,7 @@ static void setupWebServer(){
   server.on("/api/stream/start",HTTP_POST,[]{ if(!requirePost())return; startStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/stop",HTTP_POST,[]{ if(!requirePost())return; stopStreaming(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/stream/reconnect",HTTP_POST,[]{ if(!requirePost())return; reconnectStreaming(); sendJson(200,"{\"ok\":true}"); });
-  server.on("/api/wifi/disconnect",HTTP_POST,[]{ if(!requirePost())return; wifiManualDisconnect=true; stopUdpListener(); mdnsStarted=false; WiFi.disconnect(false,false); setReceiverState(RX_WIFI_OFFLINE,"WiFi manually disconnected"); sendJson(200,"{\"ok\":true}"); });
-  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; wifiManualDisconnect=false; WiFi.disconnect(false,false); stopUdpListener(); mdnsStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
+  server.on("/api/wifi/reconnect",HTTP_POST,[]{ if(!requirePost())return; WiFi.disconnect(false,false); stopUdpListener(); mdnsStarted=false; lastWifiAttemptMs=0; connectWifiIfNeeded(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/clear-stats",HTTP_POST,[]{ if(!requirePost())return; stats=RuntimeStats(); sendJson(200,"{\"ok\":true}"); });
   server.on("/api/system/reboot",HTTP_POST,[]{ if(!requirePost())return; sendJson(200,"{\"ok\":true,\"message\":\"Restarting\"}"); delay(250); ESP.restart(); });
   server.on("/api/system/factory-reset",HTTP_POST,[]{ if(!requirePost())return; resetSettings(); sendJson(200,"{\"ok\":true,\"message\":\"Reset; restarting\"}"); delay(250); ESP.restart(); });
