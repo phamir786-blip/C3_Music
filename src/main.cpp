@@ -1,8 +1,7 @@
 /*
   C3 Music Receiver (UDP Edition)
-  ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
+  ESP32-C3 + UDA1334A I2S DAC
   High-Performance Low-Latency UDP Audio Receiver (Port 50005)
-  OLED: SDA 5, SCL 6
   I2S: BCLK 3, LRCLK 1, DOUT 10
 */
 
@@ -13,8 +12,6 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <Update.h>
-#include <U8g2lib.h>
-#include <Wire.h>
 #include <driver/i2s.h>
 #include <math.h>
 
@@ -23,11 +20,6 @@ static const char WIFI_PASSWORD[] = "006BF4FD";
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3music";
 static const char FIRMWARE_VERSION[] = "2.0.0";
-
-static constexpr uint8_t OLED_SDA = 5;
-static constexpr uint8_t OLED_SCL = 6;
-static constexpr uint8_t OLED_WIDTH = 72;
-static constexpr uint8_t OLED_HEIGHT = 40;
 
 static constexpr int I2S_BCLK_PIN = 3;
 static constexpr int I2S_LRCLK_PIN = 1;
@@ -48,7 +40,6 @@ static constexpr size_t UDP_MAX_PACKET_BYTES = 1472;
 static constexpr size_t I2S_WRITE_BYTES = 2048;
 static constexpr uint32_t PREBUFFER_BYTES = 12000;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
-static constexpr uint32_t OLED_REFRESH_MS = 650;
 static constexpr uint32_t STATUS_REFRESH_MS = 1000;
 static constexpr uint32_t STREAM_READ_TIMEOUT_MS = 5000;
 
@@ -73,14 +64,11 @@ struct RuntimeStats {
 
 struct Settings {
   uint16_t udpPort = UDP_DEFAULT_PORT;
-  bool autoReconnect = true, oledEnabled = true, streamEnabled = true;
+  bool autoReconnect = true, streamEnabled = true;
   uint16_t targetBufferMs = 250;
   uint8_t volumePercent = 50;
 };
 
-static U8G2_SSD1306_72X40_ER_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
-static bool oledAvailable = false;
-static bool oledStreamingDisabled = false;
 static Preferences preferences;
 static WebServer server(80);
 static WiFiUDP udpClient;
@@ -99,14 +87,13 @@ static SemaphoreHandle_t audioDataSemaphore = nullptr;
 static SemaphoreHandle_t i2sMux = nullptr;
 static SemaphoreHandle_t udpMux = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr, playbackTaskHandle = nullptr;
-static uint32_t lastWifiAttemptMs = 0, lastOledRefreshMs = 0, lastStatusRefreshMs = 0;
+static uint32_t lastWifiAttemptMs = 0, lastStatusRefreshMs = 0;
 static bool mdnsStarted = false;
 
 static void loadSettings() {
   preferences.begin("c3music", false);
   settings.udpPort = preferences.getUShort("udpport", UDP_DEFAULT_PORT);
   settings.autoReconnect = preferences.getBool("autorecon", true);
-  settings.oledEnabled = preferences.getBool("oled", true);
   settings.streamEnabled = preferences.getBool("enabled", true);
   settings.targetBufferMs = preferences.getUShort("buffer", 250);
   settings.volumePercent = preferences.getUChar("volume", 50);
@@ -119,7 +106,6 @@ static void loadSettings() {
 static void saveSettings() {
   preferences.putUShort("udpport", settings.udpPort);
   preferences.putBool("autorecon", settings.autoReconnect);
-  preferences.putBool("oled", settings.oledEnabled);
   preferences.putBool("enabled", settings.streamEnabled);
   preferences.putUShort("buffer", settings.targetBufferMs);
   preferences.putUChar("volume", settings.volumePercent);
@@ -129,7 +115,7 @@ static void resetSettings() {
   preferences.clear(); preferences.end();
   settings.udpPort = UDP_DEFAULT_PORT;
   settings.autoReconnect = true;
-  settings.oledEnabled = true; settings.streamEnabled = true;
+  settings.streamEnabled = true;
   settings.targetBufferMs = 250;
   settings.volumePercent = 50;
   preferences.begin("c3music", false); saveSettings();
@@ -202,81 +188,6 @@ static void ringClear() {
 
 static size_t ringSize() { portENTER_CRITICAL(&ringMux); size_t v = (size_t)ringCount; portEXIT_CRITICAL(&ringMux); return v; }
 static uint8_t ringPercent() { return (uint8_t)((ringSize() * 100UL) / AUDIO_RING_BYTES); }
-
-static void displayBegin() {
-  Wire.begin(OLED_SDA, OLED_SCL);
-  oled.begin();
-  oled.setPowerSave(settings.oledEnabled ? 0 : 1);
-  oled.clearBuffer();
-  oled.setFont(u8g2_font_5x7_tf);
-  oled.drawStr(0, 7, "C3 MUSIC");
-  oled.drawStr(0, 17, "Starting...");
-  oled.sendBuffer();
-  oledAvailable = true;
-}
-
-static void displayLineCenter(const char *text, uint8_t y, const uint8_t *font) {
-  oled.setFont(font);
-  int w = oled.getStrWidth(text);
-  int x = (OLED_WIDTH - w) / 2; if (x < 0) x = 0;
-  oled.drawStr(x, y, text);
-}
-
-static void displayUpdate() {
-  if (!oledAvailable || !settings.oledEnabled) return;
-
-  if (receiverState == RX_STREAMING) {
-    if (!oledStreamingDisabled) {
-      oled.setPowerSave(1);
-      oledStreamingDisabled = true;
-      Serial.println("[OLED] Deactivated during streaming");
-    }
-    return;
-  }
-
-  if (oledStreamingDisabled) return;
-
-  if (millis() - lastOledRefreshMs < OLED_REFRESH_MS) return;
-  lastOledRefreshMs = millis();
-  char buf[32];
-  oled.clearBuffer();
-  oled.setFont(u8g2_font_5x7_tf);
-  oled.drawStr(0, 7, "C3 MUSIC");
-  const char *st = "BOOT";
-  switch(receiverState) {
-    case RX_WIFI_CONNECTING: st = "WIFI"; break;
-    case RX_WIFI_OFFLINE: st = "NO WIFI"; break;
-    case RX_IDLE: st = "READY"; break;
-    case RX_CONNECTING: st = "LINK"; break;
-    case RX_BUFFERING: st = "BUFFER"; break;
-    case RX_STREAMING: st = "PLAY"; break;
-    case RX_STOPPED: st = "STOP"; break;
-    case RX_ERROR: st = "ERROR"; break;
-    case RX_UPDATING: st = "OTA"; break;
-  }
-  int sw = oled.getStrWidth(st);
-  oled.drawStr(OLED_WIDTH - sw, 7, st);
-  if (receiverState == RX_STREAMING || receiverState == RX_BUFFERING) {
-    snprintf(buf, sizeof(buf), "%luk %s", (unsigned long)(streamFormat.sampleRate/1000), streamFormat.channels==2?"ST":"MO");
-    displayLineCenter(buf, 19, u8g2_font_6x10_tf);
-    snprintf(buf, sizeof(buf), "BUF %u%%", ringPercent());
-    displayLineCenter(buf, 29, u8g2_font_4x6_tf);
-    oled.drawFrame(0,33,OLED_WIDTH,7);    uint8_t w = (uint8_t)(((OLED_WIDTH-2)*ringPercent())/100);    if (w>0) oled.drawBox(1,34,w,5);
-  } else {
-    String msg;
-    if (WiFi.status()==WL_CONNECTED) msg = WiFi.localIP().toString();
-    else if (receiverState==RX_WIFI_CONNECTING) msg = "Connecting...";
-    else msg = "Check WiFi";
-    displayLineCenter(msg.c_str(), 22, u8g2_font_6x10_tf);
-    if (receiverState==RX_ERROR && stats.lastError.length()>0) {
-      String e = stats.lastError; if (e.length()>17) e=e.substring(0,17);
-      displayLineCenter(e.c_str(), 38, u8g2_font_4x6_tf);
-    } else {
-      displayLineCenter("c3music.local", 38, u8g2_font_4x6_tf);
-    }
-  }
-  oled.sendBuffer();
-}
 
 static void beginMdnsIfNeeded();
 
@@ -615,7 +526,6 @@ static String makeStatusJson(){
   r+="\"heap\":"+String(ESP.getFreeHeap())+",";
   r+="\"cpuTemp\":"+String(temperatureRead(), 1)+",";
   r+="\"flashSize\":"+String(ESP.getFlashChipSize())+",";
-  r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
   r+="\"lastError\":\""+jsonEscape(stats.lastError)+"\"";
   r+="}";
   return r;
@@ -626,7 +536,6 @@ static String makeConfigJson(){
   r+="{";
   r+="\"udpPort\":"+String(settings.udpPort)+",";
   r+="\"autoReconnect\":"+String(settings.autoReconnect?"true":"false")+",";
-  r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
   r+="\"streamEnabled\":"+String(settings.streamEnabled?"true":"false")+",";
   r+="\"bufferMs\":"+String(settings.targetBufferMs)+",";
   r+="\"volume\":"+String(settings.volumePercent)+",";
@@ -727,7 +636,7 @@ button.action,.mute-btn,.file::file-selector-button,.select-option{font-size:var
 <div class="field"><label>UDP Listening Port</label><input id="udpInput" type="number" min="1" max="65535" value="50005"></div>
 <div class="field"><label>Target Buffer (ms)</label><input id="bufferInput" type="number" min="80" max="700" step="10"></div>
 <div class="switchrow"><span>Automatic Stream Reconnect</span><input class="switch" id="autoreconnectInput" type="checkbox"></div><div class="buttons"><button class="action" onclick="saveCfg()">Save Settings</button></div></div>
-<div class="card"><div class="section-title"><h2>Device Settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="16" rx="2"/><path d="M9 7h6M9 17h6"/></svg></span></div><div class="switchrow"><span>OLED Enabled</span><input class="switch" id="oledInput" type="checkbox" onchange="saveCfg()"></div><div class="row"><span class="label">Firmware</span><span class="value" id="version">—</span></div><div class="row"><span class="label">Free heap</span><span class="value" id="heap">—</span></div><div class="row"><span class="label">CPU temperature</span><span class="value" id="cpuTemp">—</span></div></div>
+<div class="card"><div class="section-title"><h2>Device Settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="16" rx="2"/><path d="M9 7h6M9 17h6"/></svg></span></div><div class="row"><span class="label">Firmware</span><span class="value" id="version">—</span></div><div class="row"><span class="label">Free heap</span><span class="value" id="heap">—</span></div><div class="row"><span class="label">CPU temperature</span><span class="value" id="cpuTemp">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Firmware OTA</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4M7.5 8.5 12 4l4.5 4.5M6 15v4h12v-4"/></svg></span></div><p class="small">Select a .bin file. Streaming will stop during update.</p><input id="firmware" class="file" type="file" accept=".bin"><div class="buttons"><button class="action" id="otaBtn" onclick="uploadFw()">Install Firmware</button></div><progress id="otaProg" class="hidden" value="0" max="100"></progress><div class="small" id="otaTxt"></div></div>
 <div class="card"><div class="section-title"><h2>Maintenance</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6Z"/><path d="m19 13.4 1.3 1-1.8 3.1-1.6-.7a7.5 7.5 0 0 1-2.5 1.4L14.1 20h-3.6l-.3-1.8a7.5 7.5 0 0 1-2.5-1.4l-1.6.7-1.8-3.1 1.3-1a7.4 7.4 0 0 1 0-2.8l-1.3-1 1.8-3.1 1.6.7a7.5 7.5 0 0 1 2.5-1.4L10.5 4h3.6l.3 1.8a7.5 7.5 0 0 1 2.5 1.4l1.6-.7 1.8 3.1-1.3 1a7.4 7.4 0 0 1 0 2.8Z"/></svg></span></div><div class="buttons"><button class="action secondary" onclick="act('/api/system/clear-stats')">Clear Stats</button><button class="action secondary" onclick="act('/api/system/reboot')">Restart</button><button class="action danger" onclick="if(confirm('Factory Reset?'))act('/api/system/factory-reset')">Factory Reset</button></div></div>
 </section></main>
@@ -753,9 +662,9 @@ function apply(d){
  const p=Number(d.bufferPercent||0);text('bufferText',p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('deviceStatus');c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Stopped'||d.state==='Error'||d.state==='WiFi offline'?'bad':(d.state==='Connecting'?'connecting':'')))
 }
 let pollBusy=false;let pollTimer=0;async function poll(){if(pollBusy)return;pollBusy=true;try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)await loadCfg()}catch(e){text('state','Web lost');text('deviceStatus','Offline');$('deviceStatus').className='chip bad'}finally{pollBusy=false}}function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{poll();schedulePoll()},document.visibilityState==='visible'?1000:1500)}
-async function loadCfg(){try{const d=await(await fetch('/api/config',{cache:'no-store'})).json();$('udpInput').value=d.udpPort||50005;$('bufferInput').value=d.bufferMs||250;$('autoreconnectInput').checked=!!d.autoReconnect;$('oledInput').checked=!!d.oled;const v=Math.max(0,Math.min(100,Number(d.volume??50)||0));$('volumeInput').value=v;updateVolumeUI(v);cfgLoaded=true}catch(e){}}
+async function loadCfg(){try{const d=await(await fetch('/api/config',{cache:'no-store'})).json();$('udpInput').value=d.udpPort||50005;$('bufferInput').value=d.bufferMs||250;$('autoreconnectInput').checked=!!d.autoReconnect;const v=Math.max(0,Math.min(100,Number(d.volume??50)||0));$('volumeInput').value=v;updateVolumeUI(v);cfgLoaded=true}catch(e){}}
 async function act(url){try{const r=await fetch(url,{method:'POST'}),d=await r.json();toast(d.ok?'Done':(d.error||'Failed'));setTimeout(poll,300)}catch(e){toast('Request failed')}}
-async function saveCfg(){const body=new URLSearchParams({udpPort:$('udpInput').value,bufferMs:$('bufferInput').value,autoReconnect:$('autoreconnectInput').checked?'1':'0',oled:$('oledInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}
+async function saveCfg(){const body=new URLSearchParams({udpPort:$('udpInput').value,bufferMs:$('bufferInput').value,autoReconnect:$('autoreconnectInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}
 function uploadFw(){const f=$('firmware').files[0];if(!f){toast('Choose .bin first');return}if(!confirm('Install '+f.name+'?'))return;const xhr=new XMLHttpRequest(),form=new FormData();form.append('firmware',f);$('otaProg').classList.remove('hidden');$('otaProg').value=0;$('otaTxt').textContent='Uploading…';$('otaBtn').disabled=true;xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('otaProg').value=p;$('otaTxt').textContent='Uploading '+p+'%'}};xhr.onload=()=>{$('otaBtn').disabled=false;if(xhr.status===200){$('otaProg').value=100;$('otaTxt').textContent='Update accepted. Restarting…';toast('Firmware update successful')}else{$('otaTxt').textContent='Update failed: '+xhr.responseText;toast('OTA failed')}};xhr.onerror=()=>{$('otaBtn').disabled=false;$('otaTxt').textContent='Upload failed';toast('OTA failed')};xhr.open('POST','/api/ota');xhr.send(form)}
 const navButtons=Array.from(document.querySelectorAll('nav button'));const tabs=Array.from(document.querySelectorAll('.tab'));function showTab(index,direction=0){if(index<0||index>=navButtons.length)return;navButtons.forEach(x=>x.classList.remove('active'));tabs.forEach(x=>x.classList.remove('active','from-left','from-right'));const b=navButtons[index],panel=$(b.dataset.tab);b.classList.add('active');if(panel){panel.classList.add('active');if(direction<0)panel.classList.add('from-right');else if(direction>0)panel.classList.add('from-left')}window.scrollTo({top:0,behavior:'smooth'})}navButtons.forEach((b,i)=>b.onclick=()=>showTab(i,0));
 poll();schedulePoll();document.addEventListener('visibilitychange',schedulePoll);
@@ -781,18 +690,7 @@ static void setupWebServer(){
     if (up<1||up>65535){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid port\"}"); return; }
     settings.udpPort=(uint16_t)up;
     uint32_t bm=server.arg("bufferMs").toInt(); if (bm<80||bm>700){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid buffer\"}"); return; }
-    settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.oledEnabled=(server.arg("oled")=="1"); settings.targetBufferMs=(uint16_t)bm;
-    if (oledAvailable) {
-      if (settings.oledEnabled) {
-        oledStreamingDisabled = false;
-        oled.setPowerSave(0);
-        oled.clearBuffer();
-        oled.sendBuffer();
-      } else {
-        oledStreamingDisabled = false;
-        oled.setPowerSave(1);
-      }
-    }
+    settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.targetBufferMs=(uint16_t)bm;
     saveSettings(); reconnectStreaming(); sendJson(200,"{\"ok\":true}");
   });
   server.on("/api/volume",HTTP_POST,[]{
@@ -825,13 +723,13 @@ void setup(){
   audioDataSemaphore=xSemaphoreCreateBinary();
   i2sMux=xSemaphoreCreateMutex();
   udpMux=xSemaphoreCreateMutex();
-  displayBegin(); setReceiverState(RX_BOOTING);
+  setReceiverState(RX_BOOTING);
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setAutoReconnect(true);
   setupWebServer();
   BaseType_t ok1=xTaskCreate(playbackTask,"i2sPlayback",4096,nullptr,3,&playbackTaskHandle);
   BaseType_t ok2=xTaskCreate(streamTask,"udpStream",6144,nullptr,2,&streamTaskHandle);
   if (ok1!=pdPASS||ok2!=pdPASS) setReceiverState(RX_ERROR,"Task creation failed");
-  connectWifiIfNeeded(); displayUpdate();
+  connectWifiIfNeeded();
 }
 
 void loop(){
@@ -845,7 +743,6 @@ void loop(){
     connectWifiIfNeeded();
   }
   else beginMdnsIfNeeded();
-  displayUpdate();
   if (millis()-lastStatusRefreshMs>=STATUS_REFRESH_MS){
     lastStatusRefreshMs=millis();
     uint32_t target=targetPrebufferBytes();
