@@ -1,7 +1,7 @@
 /*
   C3 Music Receiver (UDP Edition)
-  ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
-  High-Performance Low-Latency UDP Audio Receiver (Port 50005)
+  ESP32-C3 + PCM5102A I2S DAC
+  UDP PCM Receiver with 24/32-bit PCM support (Port 50005)
   OLED: SDA 5, SCL 6
   I2S: BCLK 3, LRCLK 1, DOUT 10
 */
@@ -24,7 +24,7 @@ static const char PHONE_HOST[] = "192.168.254.119";
 
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3music";
-static const char FIRMWARE_VERSION[] = "2.0.0";
+static const char FIRMWARE_VERSION[] = "2.1.0";
 
 static constexpr uint8_t OLED_SDA = 5;
 static constexpr uint8_t OLED_SCL = 6;
@@ -37,9 +37,9 @@ static constexpr int I2S_DOUT_PIN = 10;
 
 static constexpr uint16_t UDP_DEFAULT_PORT = 50005;
 
-static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
+static constexpr uint32_t DEFAULT_SAMPLE_RATE = 48000;
 static constexpr uint8_t DEFAULT_CHANNELS = 2;
-static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 16;
+static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 32;
 
 static constexpr uint8_t C3_PROTOCOL_VERSION = 1;
 static constexpr size_t C3_FORMAT_HEADER_BYTES = 16;
@@ -117,8 +117,8 @@ static void loadSettings() {
   if (settings.volumePercent > 100) settings.volumePercent = 100;
   if (settings.phoneHost.length() == 0) settings.phoneHost = PHONE_HOST;
   if (settings.udpPort == 0) settings.udpPort = UDP_DEFAULT_PORT;
-  if (settings.targetBufferMs < 80) settings.targetBufferMs = 80;
-  if (settings.targetBufferMs > 700) settings.targetBufferMs = 700;
+  if (settings.targetBufferMs != 15 && settings.targetBufferMs != 50 &&
+      settings.targetBufferMs != 150 && settings.targetBufferMs != 300) settings.targetBufferMs = 150;
 }
 
 static void saveSettings() {
@@ -137,7 +137,7 @@ static void resetSettings() {
   settings.udpPort = UDP_DEFAULT_PORT;
   settings.autoReconnect = true;
   settings.oledEnabled = true; settings.streamEnabled = true;
-  settings.targetBufferMs = 250;
+  settings.targetBufferMs = 150;
   settings.volumePercent = 50;
   preferences.begin("c3music", false); saveSettings();
 }
@@ -332,12 +332,13 @@ static void stopUdpListener() {
 }
 
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
-  if (bits!=16 || (ch!=1 && ch!=2)) return false;
+  if ((bits!=24 && bits!=32) || sr!=48000 || (ch!=1 && ch!=2)) return false;
   
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
   if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
 
-  i2s_bits_per_sample_t bps = I2S_BITS_PER_SAMPLE_16BIT;
+  // PCM5102A standard Philips I2S input uses 32-bit slots for 24/32-bit PCM.
+  i2s_bits_per_sample_t bps = I2S_BITS_PER_SAMPLE_32BIT;
 
   i2s_config_t cfg = {
     .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
@@ -395,9 +396,9 @@ static bool parseC3HeaderIfPresent(const uint8_t *pkt, size_t len, size_t &paylo
   const uint32_t expectedFrameSize = (uint32_t)channels * (uint32_t)(bits / 8);
 
   if (version == C3_PROTOCOL_VERSION &&
-      bits == 16 &&
+      (bits == 24 || bits == 32) &&
       (channels == 1 || channels == 2) &&
-      (sampleRate == 44100 || sampleRate == 48000) &&
+      sampleRate == 48000 &&
       frameSize == expectedFrameSize &&
       expectedFrameSize > 0) {
     streamFormat.sampleRate = sampleRate;
@@ -418,48 +419,50 @@ static uint8_t playbackIn[I2S_WRITE_BYTES / 2];
 static uint8_t playbackOut[I2S_WRITE_BYTES * 2];
 
 static void playbackTask(void*) {
-  for(;;){
-    if (!i2sReady || !bufferStarted){ vTaskDelay(pdMS_TO_TICKS(10)); continue; }
-
-    size_t want = sizeof(playbackIn);
-    size_t n = ringRead(playbackIn, want);
-    if (n==0){
-      stats.underruns++;
+  for (;;) {
+    if (!i2sReady || !bufferStarted || !streamFormat.valid) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
+    }
+    const size_t bytesPerSample = streamFormat.bitsPerSample / 8;
+    const size_t frameBytes = bytesPerSample * streamFormat.channels;
+    const size_t available = ringSize();
+    size_t nWant = available < sizeof(playbackIn) ? available : sizeof(playbackIn);
+    nWant -= nWant % frameBytes;
+    if (!nWant) {
       if (audioDataSemaphore) xSemaphoreTake(audioDataSemaphore, pdMS_TO_TICKS(20));
       else vTaskDelay(pdMS_TO_TICKS(4));
       continue;
     }
+    const size_t n = ringRead(playbackIn, nWant);
+    if (!n) { stats.underruns++; vTaskDelay(pdMS_TO_TICKS(2)); continue; }
 
-    const uint8_t *writeBuf = playbackIn;
-    size_t writeLen = n;
-    uint8_t volume = settings.volumePercent;
-
-    if (streamFormat.bitsPerSample == 16) {
-      if (volume < 100) {
-        int16_t *samples = reinterpret_cast<int16_t*>(playbackIn);
-        size_t sampleCount = n / sizeof(int16_t);
-        for (size_t i = 0; i < sampleCount; ++i) {
-          samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
-        }
+    const size_t samples = n / bytesPerSample;
+    const size_t frames = n / frameBytes;
+    int32_t *out = reinterpret_cast<int32_t*>(playbackOut);
+    const uint8_t volume = settings.volumePercent;
+    for (size_t i = 0; i < samples; ++i) {
+      int32_t sample;
+      if (streamFormat.bitsPerSample == 24) {
+        const uint8_t *p = playbackIn + i * 3;
+        uint32_t raw = (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16);
+        if (raw & 0x00800000UL) raw |= 0xFF000000UL;
+        sample = (int32_t)((int64_t)(int32_t)raw * 256LL);
+      } else {
+        memcpy(&sample, playbackIn + i * 4, sizeof(sample));
       }
-
-      if (streamFormat.channels==1) {
-        size_t samples = n / 2;
-        int16_t *src = reinterpret_cast<int16_t*>(playbackIn);
-        int16_t *dst = reinterpret_cast<int16_t*>(playbackOut);
-        for (size_t i=0;i<samples;i++) { dst[i*2]=src[i]; dst[i*2+1]=src[i]; }
-        writeBuf = playbackOut;
-        writeLen = samples * 4;
-      }
+      if (volume < 100) sample = (int32_t)(((int64_t)sample * volume) / 100);
+      if (streamFormat.channels == 2) out[i] = sample;
+      else { out[i * 2] = sample; out[i * 2 + 1] = sample; }
     }
-
+    const size_t outputBytes = frames * 8;
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
-    bool ready = i2sReady;
-    size_t w=0;
-    esp_err_t r = ready ? i2s_write(I2S_NUM_0,writeBuf,writeLen,&w,pdMS_TO_TICKS(40)) : ESP_FAIL;
+    size_t written = 0;
+    const esp_err_t result = i2sReady
+      ? i2s_write(I2S_NUM_0, playbackOut, outputBytes, &written, pdMS_TO_TICKS(40))
+      : ESP_FAIL;
     if (i2sMux) xSemaphoreGive(i2sMux);
-
-    if (r==ESP_OK && w>0) stats.bytesPlayed += (streamFormat.channels==1) ? (w/2) : w;
+    if (result == ESP_OK && written > 0) stats.bytesPlayed += written;
     else vTaskDelay(pdMS_TO_TICKS(2));
   }
 }
@@ -719,7 +722,7 @@ nav .nav-inner button svg{width:20px;height:20px;fill:none;stroke:currentColor;s
 <div class="settings-intro"><strong>Settings</strong> · UDP connection, buffer, OLED and system controls</div>
 <div class="card"><div class="section-title"><h2>Stream settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div>
 <div class="field"><label>UDP Listening Port</label><input id="udpInput" type="number" min="1" max="65535" value="50005"></div>
-<div class="field"><label>Target buffer (ms)</label><input id="bufferInput" type="number" min="80" max="700" step="10"></div>
+<div class="field"><label>Target buffer (ms)</label><select id="bufferInput"><option value="15">15 ms</option><option value="50">50 ms</option><option value="150">150 ms</option><option value="300">300 ms</option></select></div>
 <div class="switchrow"><span>Automatic stream reconnect</span><input class="switch" id="autoreconnectInput" type="checkbox"></div><div class="buttons"><button class="action" onclick="saveCfg()">Save settings</button></div></div>
 <div class="card"><div class="section-title"><h2>Device settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="16" rx="2"/><path d="M9 7h6M9 17h6"/></svg></span></div><div class="switchrow"><span>OLED enabled</span><input class="switch" id="oledInput" type="checkbox" onchange="saveCfg()"></div><div class="row"><span class="label">Firmware</span><span class="value" id="version">—</span></div><div class="row"><span class="label">Free heap</span><span class="value" id="heap">—</span></div><div class="row"><span class="label">CPU temperature</span><span class="value" id="cpuTemp">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Firmware OTA</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4M7.5 8.5 12 4l4.5 4.5M6 15v4h12v-4"/></svg></span></div><p class="small">Select a .bin file. Streaming will stop during update.</p><input id="firmware" class="file" type="file" accept=".bin"><div class="buttons"><button class="action" id="otaBtn" onclick="uploadFw()">Install firmware</button></div><progress id="otaProg" class="hidden" value="0" max="100"></progress><div class="small" id="otaTxt"></div></div>
@@ -774,7 +777,7 @@ static void setupWebServer(){
     uint32_t up=server.arg("udpPort").toInt();
     if (up<1||up>65535){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid port\"}"); return; }
     settings.udpPort=(uint16_t)up;
-    uint32_t bm=server.arg("bufferMs").toInt(); if (bm<80||bm>700){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid buffer\"}"); return; }
+    uint32_t bm=server.arg("bufferMs").toInt(); if (bm!=15 && bm!=50 && bm!=150 && bm!=300){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid buffer\"}"); return; }
     settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.oledEnabled=(server.arg("oled")=="1"); settings.targetBufferMs=(uint16_t)bm;
     if (oledAvailable) {
       if (settings.oledEnabled) {
