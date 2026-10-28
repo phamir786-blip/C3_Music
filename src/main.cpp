@@ -1,9 +1,9 @@
 /*
   C3 Music Receiver (UDP Edition)
-  ESP32-C3 + SSD1306 72x40 OLED + UDA1334A I2S DAC
+  ESP32-C3 + PCM5102 / UDA1334A I2S DAC
   High-Performance Low-Latency UDP Audio Receiver (Port 50005)
-  OLED: SDA 5, SCL 6
   I2S: BCLK 3, LRCLK 1, DOUT 10
+  Locked to: 48 kHz, Stereo, 16/24/32-bit PCM
 */
 
 #include <Arduino.h>
@@ -13,21 +13,14 @@
 #include <ESPmDNS.h>
 #include <Preferences.h>
 #include <Update.h>
-#include <U8g2lib.h>
-#include <Wire.h>
 #include <driver/i2s.h>
 #include <math.h>
 
 static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
 static const char DEVICE_NAME[] = "C3 Music Receiver";
-static const char MDNS_HOSTNAME[] = "c3music";
-static const char FIRMWARE_VERSION[] = "2.0.0";
-
-static constexpr uint8_t OLED_SDA = 5;
-static constexpr uint8_t OLED_SCL = 6;
-static constexpr uint8_t OLED_WIDTH = 72;
-static constexpr uint8_t OLED_HEIGHT = 40;
+static const char MDNS_HOSTNAME[] = "c3new";
+static const char FIRMWARE_VERSION[] = "2.1.0";
 
 static constexpr int I2S_BCLK_PIN = 3;
 static constexpr int I2S_LRCLK_PIN = 1;
@@ -35,8 +28,8 @@ static constexpr int I2S_DOUT_PIN = 10;
 
 static constexpr uint16_t UDP_DEFAULT_PORT = 50005;
 
-static constexpr uint32_t DEFAULT_SAMPLE_RATE = 44100;
-static constexpr uint8_t DEFAULT_CHANNELS = 2;
+static constexpr uint32_t DEFAULT_SAMPLE_RATE = 48000; // Locked to 48 kHz
+static constexpr uint8_t DEFAULT_CHANNELS = 2;         // Locked to Stereo
 static constexpr uint8_t DEFAULT_BITS_PER_SAMPLE = 16;
 
 static constexpr uint8_t C3_PROTOCOL_VERSION = 1;
@@ -48,7 +41,6 @@ static constexpr size_t UDP_MAX_PACKET_BYTES = 1472;
 static constexpr size_t I2S_WRITE_BYTES = 2048;
 static constexpr uint32_t PREBUFFER_BYTES = 12000;
 static constexpr uint32_t WIFI_RETRY_MS = 10000;
-static constexpr uint32_t OLED_REFRESH_MS = 650;
 static constexpr uint32_t STATUS_REFRESH_MS = 1000;
 static constexpr uint32_t STREAM_READ_TIMEOUT_MS = 5000;
 
@@ -73,14 +65,11 @@ struct RuntimeStats {
 
 struct Settings {
   uint16_t udpPort = UDP_DEFAULT_PORT;
-  bool autoReconnect = true, oledEnabled = true, streamEnabled = true;
+  bool autoReconnect = true, streamEnabled = true;
   uint16_t targetBufferMs = 250;
   uint8_t volumePercent = 50;
 };
 
-static U8G2_SSD1306_72X40_ER_F_HW_I2C oled(U8G2_R0, U8X8_PIN_NONE);
-static bool oledAvailable = false;
-static bool oledStreamingDisabled = false;
 static Preferences preferences;
 static WebServer server(80);
 static WiFiUDP udpClient;
@@ -99,14 +88,13 @@ static SemaphoreHandle_t audioDataSemaphore = nullptr;
 static SemaphoreHandle_t i2sMux = nullptr;
 static SemaphoreHandle_t udpMux = nullptr;
 static TaskHandle_t streamTaskHandle = nullptr, playbackTaskHandle = nullptr;
-static uint32_t lastWifiAttemptMs = 0, lastOledRefreshMs = 0, lastStatusRefreshMs = 0;
+static uint32_t lastWifiAttemptMs = 0, lastStatusRefreshMs = 0;
 static bool mdnsStarted = false;
 
 static void loadSettings() {
   preferences.begin("c3music", false);
   settings.udpPort = preferences.getUShort("udpport", UDP_DEFAULT_PORT);
   settings.autoReconnect = preferences.getBool("autorecon", true);
-  settings.oledEnabled = preferences.getBool("oled", true);
   settings.streamEnabled = preferences.getBool("enabled", true);
   settings.targetBufferMs = preferences.getUShort("buffer", 250);
   settings.volumePercent = preferences.getUChar("volume", 50);
@@ -119,7 +107,6 @@ static void loadSettings() {
 static void saveSettings() {
   preferences.putUShort("udpport", settings.udpPort);
   preferences.putBool("autorecon", settings.autoReconnect);
-  preferences.putBool("oled", settings.oledEnabled);
   preferences.putBool("enabled", settings.streamEnabled);
   preferences.putUShort("buffer", settings.targetBufferMs);
   preferences.putUChar("volume", settings.volumePercent);
@@ -129,7 +116,7 @@ static void resetSettings() {
   preferences.clear(); preferences.end();
   settings.udpPort = UDP_DEFAULT_PORT;
   settings.autoReconnect = true;
-  settings.oledEnabled = true; settings.streamEnabled = true;
+  settings.streamEnabled = true;
   settings.targetBufferMs = 250;
   settings.volumePercent = 50;
   preferences.begin("c3music", false); saveSettings();
@@ -152,7 +139,6 @@ static void setReceiverState(ReceiverState value, const String &error = "") {
   else { Serial.printf("[STATE] %s\n", receiverStateName(value)); }
 }
 
-// Compiler type-safe ringWrite
 static bool ringWrite(const uint8_t *data, size_t length) {
   if (!data || length == 0) return true;
   bool ok = true;
@@ -173,7 +159,6 @@ static bool ringWrite(const uint8_t *data, size_t length) {
   return ok;
 }
 
-// Compiler type-safe ringRead
 static size_t ringRead(uint8_t *out, size_t maxLen) {
   if (!out || maxLen == 0) return 0;
   portENTER_CRITICAL(&ringMux);
@@ -202,81 +187,6 @@ static void ringClear() {
 
 static size_t ringSize() { portENTER_CRITICAL(&ringMux); size_t v = (size_t)ringCount; portEXIT_CRITICAL(&ringMux); return v; }
 static uint8_t ringPercent() { return (uint8_t)((ringSize() * 100UL) / AUDIO_RING_BYTES); }
-
-static void displayBegin() {
-  Wire.begin(OLED_SDA, OLED_SCL);
-  oled.begin();
-  oled.setPowerSave(settings.oledEnabled ? 0 : 1);
-  oled.clearBuffer();
-  oled.setFont(u8g2_font_5x7_tf);
-  oled.drawStr(0, 7, "C3 MUSIC");
-  oled.drawStr(0, 17, "Starting...");
-  oled.sendBuffer();
-  oledAvailable = true;
-}
-
-static void displayLineCenter(const char *text, uint8_t y, const uint8_t *font) {
-  oled.setFont(font);
-  int w = oled.getStrWidth(text);
-  int x = (OLED_WIDTH - w) / 2; if (x < 0) x = 0;
-  oled.drawStr(x, y, text);
-}
-
-static void displayUpdate() {
-  if (!oledAvailable || !settings.oledEnabled) return;
-
-  if (receiverState == RX_STREAMING) {
-    if (!oledStreamingDisabled) {
-      oled.setPowerSave(1);
-      oledStreamingDisabled = true;
-      Serial.println("[OLED] Deactivated during streaming");
-    }
-    return;
-  }
-
-  if (oledStreamingDisabled) return;
-
-  if (millis() - lastOledRefreshMs < OLED_REFRESH_MS) return;
-  lastOledRefreshMs = millis();
-  char buf[32];
-  oled.clearBuffer();
-  oled.setFont(u8g2_font_5x7_tf);
-  oled.drawStr(0, 7, "C3 MUSIC");
-  const char *st = "BOOT";
-  switch(receiverState) {
-    case RX_WIFI_CONNECTING: st = "WIFI"; break;
-    case RX_WIFI_OFFLINE: st = "NO WIFI"; break;
-    case RX_IDLE: st = "READY"; break;
-    case RX_CONNECTING: st = "LINK"; break;
-    case RX_BUFFERING: st = "BUFFER"; break;
-    case RX_STREAMING: st = "PLAY"; break;
-    case RX_STOPPED: st = "STOP"; break;
-    case RX_ERROR: st = "ERROR"; break;
-    case RX_UPDATING: st = "OTA"; break;
-  }
-  int sw = oled.getStrWidth(st);
-  oled.drawStr(OLED_WIDTH - sw, 7, st);
-  if (receiverState == RX_STREAMING || receiverState == RX_BUFFERING) {
-    snprintf(buf, sizeof(buf), "%luk %s", (unsigned long)(streamFormat.sampleRate/1000), streamFormat.channels==2?"ST":"MO");
-    displayLineCenter(buf, 19, u8g2_font_6x10_tf);
-    snprintf(buf, sizeof(buf), "BUF %u%%", ringPercent());
-    displayLineCenter(buf, 29, u8g2_font_4x6_tf);
-    oled.drawFrame(0,33,OLED_WIDTH,7);    uint8_t w = (uint8_t)(((OLED_WIDTH-2)*ringPercent())/100);    if (w>0) oled.drawBox(1,34,w,5);
-  } else {
-    String msg;
-    if (WiFi.status()==WL_CONNECTED) msg = WiFi.localIP().toString();
-    else if (receiverState==RX_WIFI_CONNECTING) msg = "Connecting...";
-    else msg = "Check WiFi";
-    displayLineCenter(msg.c_str(), 22, u8g2_font_6x10_tf);
-    if (receiverState==RX_ERROR && stats.lastError.length()>0) {
-      String e = stats.lastError; if (e.length()>17) e=e.substring(0,17);
-      displayLineCenter(e.c_str(), 38, u8g2_font_4x6_tf);
-    } else {
-      displayLineCenter("c3music.local", 38, u8g2_font_4x6_tf);
-    }
-  }
-  oled.sendBuffer();
-}
 
 static void beginMdnsIfNeeded();
 
@@ -325,23 +235,25 @@ static void stopUdpListener() {
 }
 
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
-  if (bits!=16 || (ch!=1 && ch!=2)) return false;
+  // Accept 16, 24, or 32 bits, but strictly Stereo (ch == 2) and 48 kHz
+  if ((bits != 16 && bits != 24 && bits != 32) || ch != 2 || sr != 48000) return false;
   
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
-  if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady=false; }
+  if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady = false; }
 
-  i2s_bits_per_sample_t bps = I2S_BITS_PER_SAMPLE_16BIT;
+  // 24-bit and 32-bit audio streams use 32-bit I2S container slots on ESP32-C3
+  i2s_bits_per_sample_t bps = (bits == 16) ? I2S_BITS_PER_SAMPLE_16BIT : I2S_BITS_PER_SAMPLE_32BIT;
 
   i2s_config_t cfg = {
-    .mode = (i2s_mode_t)(I2S_MODE_MASTER|I2S_MODE_TX),
+    .mode = (i2s_mode_t)(I2S_MODE_MASTER | I2S_MODE_TX),
     .sample_rate = sr,
     .bits_per_sample = bps,
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 4,
-    .dma_buf_len = 1024,
-    .use_apll = false,          // ESP32-C3 does NOT support APLL!
+    .dma_buf_count = 8,          // Optimized buffer count to prevent stuttering
+    .dma_buf_len = 512,          // Optimized buffer length
+    .use_apll = false,          // ESP32-C3 does NOT support APLL
     .tx_desc_auto_clear = true,  // Automatically clears DMA buffer on underrun
     .fixed_mclk = 0             // Must be 0!
   };
@@ -368,13 +280,13 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
   i2sReady = true;
   if (i2sMux) xSemaphoreGive(i2sMux);
 
-  Serial.printf("[I2S] %lu Hz, %u-bit, %s, BCLK=%d WS=%d DOUT=%d\n", (unsigned long)sr, bits, ch==2?"Stereo":"Mono", I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
+  Serial.printf("[I2S] %lu Hz, %u-bit Stereo, BCLK=%d WS=%d DOUT=%d\n", (unsigned long)sr, bits, I2S_BCLK_PIN, I2S_LRCLK_PIN, I2S_DOUT_PIN);
   return true;
 }
 
 static uint32_t readLe32(const uint8_t *p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
 
-// Parse optional 16-byte C3 header from UDP packet
+// Parse 16-byte C3 header from UDP packet (Locked strictly to 48kHz Stereo & 16/24/32-bit)
 static bool parseC3HeaderIfPresent(const uint8_t *pkt, size_t len, size_t &payloadOffset) {
   payloadOffset = 0;
   if (len < C3_FORMAT_HEADER_BYTES) return false;
@@ -385,12 +297,14 @@ static bool parseC3HeaderIfPresent(const uint8_t *pkt, size_t len, size_t &paylo
   const uint16_t channels = pkt[6];
   const uint32_t sampleRate = readLe32(pkt + 8);
   const uint32_t frameSize = readLe32(pkt + 12);
-  const uint32_t expectedFrameSize = (uint32_t)channels * (uint32_t)(bits / 8);
+  
+  uint32_t bytesPerSampleContainer = (bits == 16) ? 2 : 4;
+  const uint32_t expectedFrameSize = 2 * bytesPerSampleContainer; // Stereo (2 channels)
 
   if (version == C3_PROTOCOL_VERSION &&
-      bits == 16 &&
-      (channels == 1 || channels == 2) &&
-      (sampleRate == 44100 || sampleRate == 48000) &&
+      (bits == 16 || bits == 24 || bits == 32) &&
+      channels == 2 &&        // Strictly Stereo
+      sampleRate == 48000 &&  // Strictly 48 kHz
       frameSize == expectedFrameSize &&
       expectedFrameSize > 0) {
     streamFormat.sampleRate = sampleRate;
@@ -399,16 +313,14 @@ static bool parseC3HeaderIfPresent(const uint8_t *pkt, size_t len, size_t &paylo
     streamFormat.audioFormat = 1;
     streamFormat.valid = true;
     payloadOffset = C3_FORMAT_HEADER_BYTES;
-    Serial.printf("[UDP] Format Header C3MS: %lu Hz, %u-bit, %s\n",
-                  (unsigned long)sampleRate, bits, channels == 2 ? "Stereo" : "Mono");
+    Serial.printf("[UDP] Format Header C3MS: 48000 Hz, %u-bit, Stereo\n", bits);
     return true;
   }
   return false;
 }
 
-// DRAM Static buffers: completely eliminates task stack overflow risk
+// DRAM Static buffers
 static uint8_t playbackIn[I2S_WRITE_BYTES / 2];
-static uint8_t playbackOut[I2S_WRITE_BYTES * 2];
 
 static void playbackTask(void*) {
   for(;;){
@@ -416,10 +328,10 @@ static void playbackTask(void*) {
 
     size_t want = sizeof(playbackIn);
     size_t n = ringRead(playbackIn, want);
-    if (n==0){
+    if (n == 0){
       stats.underruns++;
-      if (audioDataSemaphore) xSemaphoreTake(audioDataSemaphore, pdMS_TO_TICKS(20));
-      else vTaskDelay(pdMS_TO_TICKS(4));
+      if (audioDataSemaphore) xSemaphoreTake(audioDataSemaphore, pdMS_TO_TICKS(5));
+      else vTaskDelay(pdMS_TO_TICKS(1));
       continue;
     }
 
@@ -435,25 +347,26 @@ static void playbackTask(void*) {
           samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
         }
       }
-
-      if (streamFormat.channels==1) {
-        size_t samples = n / 2;
-        int16_t *src = reinterpret_cast<int16_t*>(playbackIn);
-        int16_t *dst = reinterpret_cast<int16_t*>(playbackOut);
-        for (size_t i=0;i<samples;i++) { dst[i*2]=src[i]; dst[i*2+1]=src[i]; }
-        writeBuf = playbackOut;
-        writeLen = samples * 4;
+    } 
+    else if (streamFormat.bitsPerSample == 24 || streamFormat.bitsPerSample == 32) {
+      if (volume < 100) {
+        int32_t *samples = reinterpret_cast<int32_t*>(playbackIn);
+        size_t sampleCount = n / sizeof(int32_t);
+        for (size_t i = 0; i < sampleCount; ++i) {
+          samples[i] = (int32_t)(((int64_t)samples[i] * volume) / 100);
+        }
       }
     }
 
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
     bool ready = i2sReady;
-    size_t w=0;
-    esp_err_t r = ready ? i2s_write(I2S_NUM_0,writeBuf,writeLen,&w,pdMS_TO_TICKS(40)) : ESP_FAIL;
+    size_t w = 0;
+    // Block cleanly until DMA frees up using portMAX_DELAY
+    esp_err_t r = ready ? i2s_write(I2S_NUM_0, writeBuf, writeLen, &w, portMAX_DELAY) : ESP_FAIL;
     if (i2sMux) xSemaphoreGive(i2sMux);
 
-    if (r==ESP_OK && w>0) stats.bytesPlayed += (streamFormat.channels==1) ? (w/2) : w;
-    else vTaskDelay(pdMS_TO_TICKS(2));
+    if (r == ESP_OK && w > 0) stats.bytesPlayed += w;
+    else vTaskDelay(pdMS_TO_TICKS(1));
   }
 }
 
@@ -482,7 +395,6 @@ static void streamTask(void*) {
       continue;
     }
 
-    // Ensure UDP listener is bound to port
     if (!udpListening) {
       if (udpMux) xSemaphoreTake(udpMux, portMAX_DELAY);
       if (udpClient.begin(settings.udpPort)) {
@@ -498,7 +410,6 @@ static void streamTask(void*) {
       continue;
     }
 
-    // Process incoming UDP audio datagrams
     int packetSize = udpClient.parsePacket();
     if (packetSize > 0) {
       int len = udpClient.read(udpPacketBuf, sizeof(udpPacketBuf));
@@ -506,22 +417,22 @@ static void streamTask(void*) {
         size_t payloadOffset = 0;
         if (!streamFormat.valid || (len >= (int)C3_FORMAT_HEADER_BYTES && memcmp(udpPacketBuf, "C3MS", 4) == 0)) {
           if (parseC3HeaderIfPresent(udpPacketBuf, len, payloadOffset)) {
-            if (!i2sReady || streamFormat.sampleRate != DEFAULT_SAMPLE_RATE) {
+            if (!i2sReady) {
               beginI2S(streamFormat.sampleRate, streamFormat.channels, streamFormat.bitsPerSample);
             }
           } else if (!streamFormat.valid) {
-            Serial.println("[UDP] Waiting for valid C3MS format header");
+            Serial.println("[UDP] Waiting for valid 48kHz Stereo C3MS format header");
           }
         }
 
-        if (!i2sReady) {
+        if (!i2sReady && streamFormat.valid) {
           beginI2S(streamFormat.sampleRate, streamFormat.channels, streamFormat.bitsPerSample);
         }
 
         const uint8_t *audioData = udpPacketBuf + payloadOffset;
         size_t audioLen = len - payloadOffset;
 
-        if (audioLen > 0) {
+        if (audioLen > 0 && i2sReady) {
           stats.bytesReceived += audioLen;
           stats.lastReceiveMs = millis();
           if (stats.sessionStartedMs == 0) stats.sessionStartedMs = millis();
@@ -537,7 +448,6 @@ static void streamTask(void*) {
         }
       }
     } else {
-      // Packet timeout detection
       if (bufferStarted && (millis() - stats.lastReceiveMs > STREAM_READ_TIMEOUT_MS)) {
         bufferStarted = false;
         stats.sessionStartedMs = 0;
@@ -615,7 +525,6 @@ static String makeStatusJson(){
   r+="\"heap\":"+String(ESP.getFreeHeap())+",";
   r+="\"cpuTemp\":"+String(temperatureRead(), 1)+",";
   r+="\"flashSize\":"+String(ESP.getFlashChipSize())+",";
-  r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
   r+="\"lastError\":\""+jsonEscape(stats.lastError)+"\"";
   r+="}";
   return r;
@@ -626,7 +535,6 @@ static String makeConfigJson(){
   r+="{";
   r+="\"udpPort\":"+String(settings.udpPort)+",";
   r+="\"autoReconnect\":"+String(settings.autoReconnect?"true":"false")+",";
-  r+="\"oled\":"+String(settings.oledEnabled?"true":"false")+",";
   r+="\"streamEnabled\":"+String(settings.streamEnabled?"true":"false")+",";
   r+="\"bufferMs\":"+String(settings.targetBufferMs)+",";
   r+="\"volume\":"+String(settings.volumePercent)+",";
@@ -688,7 +596,6 @@ nav .nav-inner button svg{width:30px;height:30px;fill:none;stroke:currentColor;s
 .main-actions button.action{flex:1;min-width:0}.main-actions .icon-action{display:flex;align-items:center;justify-content:center;gap:0;padding:10px;background:#000;color:#fff;border:1px solid rgba(255,255,255,.14);box-shadow:none}.main-actions .icon-action:hover{background:#000;box-shadow:0 0 0 1px rgba(255,255,255,.12)}.main-actions .icon-action svg{width:22px;height:22px;fill:none;stroke:currentColor;stroke-width:2;stroke-linecap:round;stroke-linejoin:round}.main-actions .icon-action:first-child svg{fill:currentColor;stroke:none;width:24px;height:24px}.main-actions .icon-action:nth-child(1){color:#39ff88}.main-actions .icon-action:nth-child(2){color:#ff3b4d}.main-actions .icon-action:nth-child(3){color:#ffbf3f}#toast{position:fixed;z-index:80;left:50%;bottom:96px;transform:translate(-50%,14px);opacity:0;pointer-events:none;background:rgba(241,241,243,.97);color:#050505;border:1px solid rgba(255,255,255,.12);border-radius:14px;padding:11px 15px;font-size:13px;font-weight:700;box-shadow:0 16px 34px rgba(0,0,0,.48);backdrop-filter:blur(14px);transition:opacity .18s ease,transform .18s ease}
 #toast.show{opacity:1;transform:translate(-50%,0)}.hidden{display:none!important}
 .settings-icon{display:inline-flex;align-items:center;justify-content:center;width:20px;height:20px;color:var(--muted);flex:0 0 20px}.settings-icon svg{width:18px;height:18px;fill:none;stroke:currentColor;stroke-width:1.65;stroke-linecap:round;stroke-linejoin:round}
-/* C3 Music typography system — S3-inspired, adapted for C3 */
 :root{--font-ui:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;--fs-body:13px;--fs-small:12px;--fs-label:12px;--fs-value:12px;--fs-control:12px;--fs-section:17px;--fs-subsection:14px;--fs-hero:31px;--fw-regular:500;--fw-medium:600;--fw-section:720;--fw-control:700;--fw-strong:760;--fw-hero:800}
 body,button,input,select,textarea{font-family:var(--font-ui);font-synthesis:none}
 body{font-size:var(--fs-body);font-weight:var(--fw-regular);line-height:1.45;letter-spacing:0}
@@ -721,13 +628,13 @@ button.action,.mute-btn,.file::file-selector-button,.select-option{font-size:var
 <div class="card"><div class="section-title"><h2>Stream</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div><div class="row"><span class="label">Transport</span><span class="value" id="mode">UDP Stream</span></div><div class="row"><span class="label">Listening Port</span><span class="value" id="portDisplay">50005</span></div><div class="row"><span class="label">Session</span><span class="value" id="session">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Audio Health</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M3 12h4l2-4 3 8 2-4h7"/></svg></span></div><div class="status-grid"><div class="stat"><div class="k">Underruns</div><div class="v" id="underruns">0</div></div><div class="stat"><div class="k">Reconnects</div><div class="v" id="reconnects">0</div></div></div><div class="row" style="margin-top:8px"><span class="label">Last Error</span><span class="value" id="lastError">None</span></div></div>
 </section>
-<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3music.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons wifi-actions"><button class="action secondary" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
+<section class="tab" id="wifi"><div class="card"><div class="section-title"><h2>Wi‑Fi</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 9.5a12.5 12.5 0 0 1 16 0M7.2 13a7.5 7.5 0 0 1 9.6 0M10.3 16.2a2.8 2.8 0 0 1 3.4 0M12 19h.01"/></svg></span></div><div class="row"><span class="label">Status</span><span class="value" id="wifiStatus">—</span></div><div class="row"><span class="label">SSID</span><span class="value" id="ssid">—</span></div><div class="row"><span class="label">IP</span><span class="value" id="ip">—</span></div><div class="row"><span class="label">Hostname</span><span class="value">c3new.local</span></div><div class="row"><span class="label">Signal</span><span class="value" id="rssi">—</span></div><div class="buttons wifi-actions"><button class="action secondary" onclick="act('/api/wifi/reconnect')">Reconnect Wi‑Fi</button></div></div></section>
 <section class="tab" id="settings">
 <div class="card"><div class="section-title"><h2>Stream Settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M7 17.5 3.5 14a3.5 3.5 0 0 1 0-5l2-2a3.5 3.5 0 0 1 5 0l1.5 1.5M17 6.5 20.5 10a3.5 3.5 0 0 1 0 5l-2 2a3.5 3.5 0 0 1-5 0L12 15.5M8.5 15.5l7-7"/></svg></span></div>
 <div class="field"><label>UDP Listening Port</label><input id="udpInput" type="number" min="1" max="65535" value="50005"></div>
 <div class="field"><label>Target Buffer (ms)</label><input id="bufferInput" type="number" min="80" max="700" step="10"></div>
 <div class="switchrow"><span>Automatic Stream Reconnect</span><input class="switch" id="autoreconnectInput" type="checkbox"></div><div class="buttons"><button class="action" onclick="saveCfg()">Save Settings</button></div></div>
-<div class="card"><div class="section-title"><h2>Device Settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="16" rx="2"/><path d="M9 7h6M9 17h6"/></svg></span></div><div class="switchrow"><span>OLED Enabled</span><input class="switch" id="oledInput" type="checkbox" onchange="saveCfg()"></div><div class="row"><span class="label">Firmware</span><span class="value" id="version">—</span></div><div class="row"><span class="label">Free heap</span><span class="value" id="heap">—</span></div><div class="row"><span class="label">CPU temperature</span><span class="value" id="cpuTemp">—</span></div></div>
+<div class="card"><div class="section-title"><h2>Device Settings</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><rect x="6" y="4" width="12" height="16" rx="2"/><path d="M9 7h6M9 17h6"/></svg></span></div><div class="row"><span class="label">Firmware</span><span class="value" id="version">—</span></div><div class="row"><span class="label">Free heap</span><span class="value" id="heap">—</span></div><div class="row"><span class="label">CPU temperature</span><span class="value" id="cpuTemp">—</span></div></div>
 <div class="card"><div class="section-title"><h2>Firmware OTA</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 16V4M7.5 8.5 12 4l4.5 4.5M6 15v4h12v-4"/></svg></span></div><p class="small">Select a .bin file. Streaming will stop during update.</p><input id="firmware" class="file" type="file" accept=".bin"><div class="buttons"><button class="action" id="otaBtn" onclick="uploadFw()">Install Firmware</button></div><progress id="otaProg" class="hidden" value="0" max="100"></progress><div class="small" id="otaTxt"></div></div>
 <div class="card"><div class="section-title"><h2>Maintenance</h2><span class="settings-icon" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M12 8.7a3.3 3.3 0 1 0 0 6.6 3.3 3.3 0 0 0 0-6.6Z"/><path d="m19 13.4 1.3 1-1.8 3.1-1.6-.7a7.5 7.5 0 0 1-2.5 1.4L14.1 20h-3.6l-.3-1.8a7.5 7.5 0 0 1-2.5-1.4l-1.6.7-1.8-3.1 1.3-1a7.4 7.4 0 0 1 0-2.8l-1.3-1 1.8-3.1 1.6.7a7.5 7.5 0 0 1 2.5-1.4L10.5 4h3.6l.3 1.8a7.5 7.5 0 0 1 2.5 1.4l1.6-.7 1.8 3.1-1.3 1a7.4 7.4 0 0 1 0 2.8Z"/></svg></span></div><div class="buttons"><button class="action secondary" onclick="act('/api/system/clear-stats')">Clear Stats</button><button class="action secondary" onclick="act('/api/system/reboot')">Restart</button><button class="action danger" onclick="if(confirm('Factory Reset?'))act('/api/system/factory-reset')">Factory Reset</button></div></div>
 </section></main>
@@ -746,16 +653,16 @@ function setVolume(v){const n=Math.max(0,Math.min(100,Number(v)||0));if(n>0)last
 function apply(d){
  text('state',d.state||'—');text('deviceStatus',d.state||'—');
  const formatActive=!!d.formatValid && (d.state==='Buffering'||d.state==='Streaming');
- text('format',formatActive?((d.sampleRate||0)+' Hz · '+(d.bits||0)+'-bit · '+(d.channels===2?'Stereo':'Mono')):'UDP Audio Waiting');
+ text('format',formatActive?((d.sampleRate||0)+' Hz · '+(d.bits||0)+'-bit · Stereo'):'UDP Audio Waiting');
  text('mode',d.mode||'UDP Stream');text('portDisplay',d.udpPort||50005);text('session',time(d.sessionSeconds));text('underruns',d.underruns||0);text('reconnects',d.reconnects||0);text('lastError',d.lastError||'None');
  const vol=Math.max(0,Math.min(100,Number(d.volume??50)||0)),vi=$('volumeInput');if(vi&&document.activeElement!==vi){vi.value=vol;updateVolumeUI(vol)}
  text('wifiStatus',d.wifiConnected?'Connected':'Disconnected');text('ssid',d.ssid||'—');text('ip',d.ip||'—');text('rssi',d.wifiConnected?(d.rssi+' dBm'):'—');text('version',d.version||'—');text('heap',d.heap?(Math.round(d.heap/1024)+' KB'):'—');text('cpuTemp',d.cpuTemp!==undefined&&d.cpuTemp!==null?(Number(d.cpuTemp).toFixed(1)+' °C'):'—');
  const p=Number(d.bufferPercent||0);text('bufferText',p+'% · '+(d.bufferBytes||0)+' bytes');const c=$('deviceStatus');c.className='chip '+(d.state==='Streaming'?'ok':(d.state==='Stopped'||d.state==='Error'||d.state==='WiFi offline'?'bad':(d.state==='Connecting'?'connecting':'')))
 }
 let pollBusy=false;let pollTimer=0;async function poll(){if(pollBusy)return;pollBusy=true;try{const r=await fetch('/api/status',{cache:'no-store'});if(!r.ok)throw 0;apply(await r.json());if(!cfgLoaded)await loadCfg()}catch(e){text('state','Web lost');text('deviceStatus','Offline');$('deviceStatus').className='chip bad'}finally{pollBusy=false}}function schedulePoll(){clearTimeout(pollTimer);pollTimer=setTimeout(()=>{poll();schedulePoll()},document.visibilityState==='visible'?1000:1500)}
-async function loadCfg(){try{const d=await(await fetch('/api/config',{cache:'no-store'})).json();$('udpInput').value=d.udpPort||50005;$('bufferInput').value=d.bufferMs||250;$('autoreconnectInput').checked=!!d.autoReconnect;$('oledInput').checked=!!d.oled;const v=Math.max(0,Math.min(100,Number(d.volume??50)||0));$('volumeInput').value=v;updateVolumeUI(v);cfgLoaded=true}catch(e){}}
+async function loadCfg(){try{const d=await(await fetch('/api/config',{cache:'no-store'})).json();$('udpInput').value=d.udpPort||50005;$('bufferInput').value=d.bufferMs||250;$('autoreconnectInput').checked=!!d.autoReconnect;const v=Math.max(0,Math.min(100,Number(d.volume??50)||0));$('volumeInput').value=v;updateVolumeUI(v);cfgLoaded=true}catch(e){}}
 async function act(url){try{const r=await fetch(url,{method:'POST'}),d=await r.json();toast(d.ok?'Done':(d.error||'Failed'));setTimeout(poll,300)}catch(e){toast('Request failed')}}
-async function saveCfg(){const body=new URLSearchParams({udpPort:$('udpInput').value,bufferMs:$('bufferInput').value,autoReconnect:$('autoreconnectInput').checked?'1':'0',oled:$('oledInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}
+async function saveCfg(){const body=new URLSearchParams({udpPort:$('udpInput').value,bufferMs:$('bufferInput').value,autoReconnect:$('autoreconnectInput').checked?'1':'0'});try{const r=await fetch('/api/config',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body});const d=await r.json();toast(d.ok?'Saved':'Save failed');cfgLoaded=false;setTimeout(poll,500)}catch(e){toast('Save failed')}}
 function uploadFw(){const f=$('firmware').files[0];if(!f){toast('Choose .bin first');return}if(!confirm('Install '+f.name+'?'))return;const xhr=new XMLHttpRequest(),form=new FormData();form.append('firmware',f);$('otaProg').classList.remove('hidden');$('otaProg').value=0;$('otaTxt').textContent='Uploading…';$('otaBtn').disabled=true;xhr.upload.onprogress=e=>{if(e.lengthComputable){const p=Math.round(e.loaded/e.total*100);$('otaProg').value=p;$('otaTxt').textContent='Uploading '+p+'%'}};xhr.onload=()=>{$('otaBtn').disabled=false;if(xhr.status===200){$('otaProg').value=100;$('otaTxt').textContent='Update accepted. Restarting…';toast('Firmware update successful')}else{$('otaTxt').textContent='Update failed: '+xhr.responseText;toast('OTA failed')}};xhr.onerror=()=>{$('otaBtn').disabled=false;$('otaTxt').textContent='Upload failed';toast('OTA failed')};xhr.open('POST','/api/ota');xhr.send(form)}
 const navButtons=Array.from(document.querySelectorAll('nav button'));const tabs=Array.from(document.querySelectorAll('.tab'));function showTab(index,direction=0){if(index<0||index>=navButtons.length)return;navButtons.forEach(x=>x.classList.remove('active'));tabs.forEach(x=>x.classList.remove('active','from-left','from-right'));const b=navButtons[index],panel=$(b.dataset.tab);b.classList.add('active');if(panel){panel.classList.add('active');if(direction<0)panel.classList.add('from-right');else if(direction>0)panel.classList.add('from-left')}window.scrollTo({top:0,behavior:'smooth'})}navButtons.forEach((b,i)=>b.onclick=()=>showTab(i,0));
 poll();schedulePoll();document.addEventListener('visibilitychange',schedulePoll);
@@ -781,18 +688,7 @@ static void setupWebServer(){
     if (up<1||up>65535){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid port\"}"); return; }
     settings.udpPort=(uint16_t)up;
     uint32_t bm=server.arg("bufferMs").toInt(); if (bm<80||bm>700){ sendJson(400,"{\"ok\":false,\"error\":\"Invalid buffer\"}"); return; }
-    settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.oledEnabled=(server.arg("oled")=="1"); settings.targetBufferMs=(uint16_t)bm;
-    if (oledAvailable) {
-      if (settings.oledEnabled) {
-        oledStreamingDisabled = false;
-        oled.setPowerSave(0);
-        oled.clearBuffer();
-        oled.sendBuffer();
-      } else {
-        oledStreamingDisabled = false;
-        oled.setPowerSave(1);
-      }
-    }
+    settings.autoReconnect=(server.arg("autoReconnect")=="1"); settings.targetBufferMs=(uint16_t)bm;
     saveSettings(); reconnectStreaming(); sendJson(200,"{\"ok\":true}");
   });
   server.on("/api/volume",HTTP_POST,[]{
@@ -825,13 +721,13 @@ void setup(){
   audioDataSemaphore=xSemaphoreCreateBinary();
   i2sMux=xSemaphoreCreateMutex();
   udpMux=xSemaphoreCreateMutex();
-  displayBegin(); setReceiverState(RX_BOOTING);
+  setReceiverState(RX_BOOTING);
   WiFi.persistent(false); WiFi.mode(WIFI_STA); WiFi.setSleep(false); WiFi.setAutoReconnect(true);
   setupWebServer();
   BaseType_t ok1=xTaskCreate(playbackTask,"i2sPlayback",4096,nullptr,3,&playbackTaskHandle);
   BaseType_t ok2=xTaskCreate(streamTask,"udpStream",6144,nullptr,2,&streamTaskHandle);
   if (ok1!=pdPASS||ok2!=pdPASS) setReceiverState(RX_ERROR,"Task creation failed");
-  connectWifiIfNeeded(); displayUpdate();
+  connectWifiIfNeeded();
 }
 
 void loop(){
@@ -845,7 +741,6 @@ void loop(){
     connectWifiIfNeeded();
   }
   else beginMdnsIfNeeded();
-  displayUpdate();
   if (millis()-lastStatusRefreshMs>=STATUS_REFRESH_MS){
     lastStatusRefreshMs=millis();
     uint32_t target=targetPrebufferBytes();
