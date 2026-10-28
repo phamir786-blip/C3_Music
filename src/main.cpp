@@ -20,7 +20,7 @@ static const char WIFI_SSID[] = "GFiber_2.4_Coverage_AECD9";
 static const char WIFI_PASSWORD[] = "006BF4FD";
 static const char DEVICE_NAME[] = "C3 Music Receiver";
 static const char MDNS_HOSTNAME[] = "c3new";
-static const char FIRMWARE_VERSION[] = "2.1.0";
+static const char FIRMWARE_VERSION[] = "2.1.1";
 
 static constexpr int I2S_BCLK_PIN = 3;
 static constexpr int I2S_LRCLK_PIN = 1;
@@ -235,13 +235,11 @@ static void stopUdpListener() {
 }
 
 static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
-  // Accept 16, 24, or 32 bits, but strictly Stereo (ch == 2) and 48 kHz
   if ((bits != 16 && bits != 24 && bits != 32) || ch != 2 || sr != 48000) return false;
   
   if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
   if (i2sReady) { i2s_driver_uninstall(I2S_NUM_0); i2sReady = false; }
 
-  // 24-bit and 32-bit audio streams use 32-bit I2S container slots on ESP32-C3
   i2s_bits_per_sample_t bps = (bits == 16) ? I2S_BITS_PER_SAMPLE_16BIT : I2S_BITS_PER_SAMPLE_32BIT;
 
   i2s_config_t cfg = {
@@ -251,11 +249,11 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
     .channel_format = I2S_CHANNEL_FMT_RIGHT_LEFT,
     .communication_format = I2S_COMM_FORMAT_STAND_I2S,
     .intr_alloc_flags = ESP_INTR_FLAG_LEVEL1,
-    .dma_buf_count = 8,          // Optimized buffer count to prevent stuttering
-    .dma_buf_len = 512,          // Optimized buffer length
-    .use_apll = false,          // ESP32-C3 does NOT support APLL
-    .tx_desc_auto_clear = true,  // Automatically clears DMA buffer on underrun
-    .fixed_mclk = 0             // Must be 0!
+    .dma_buf_count = 8,          
+    .dma_buf_len = 512,          
+    .use_apll = false,          
+    .tx_desc_auto_clear = true,  
+    .fixed_mclk = 0             
   };
   
   if (i2s_driver_install(I2S_NUM_0, &cfg, 0, nullptr) != ESP_OK) {
@@ -286,7 +284,6 @@ static bool beginI2S(uint32_t sr, uint16_t ch, uint16_t bits) {
 
 static uint32_t readLe32(const uint8_t *p){ return (uint32_t)p[0]|((uint32_t)p[1]<<8)|((uint32_t)p[2]<<16)|((uint32_t)p[3]<<24); }
 
-// Parse 16-byte C3 header from UDP packet (Locked strictly to 48kHz Stereo & 16/24/32-bit)
 static bool parseC3HeaderIfPresent(const uint8_t *pkt, size_t len, size_t &payloadOffset) {
   payloadOffset = 0;
   if (len < C3_FORMAT_HEADER_BYTES) return false;
@@ -299,12 +296,12 @@ static bool parseC3HeaderIfPresent(const uint8_t *pkt, size_t len, size_t &paylo
   const uint32_t frameSize = readLe32(pkt + 12);
   
   uint32_t bytesPerSampleContainer = (bits == 16) ? 2 : 4;
-  const uint32_t expectedFrameSize = 2 * bytesPerSampleContainer; // Stereo (2 channels)
+  const uint32_t expectedFrameSize = 2 * bytesPerSampleContainer;
 
   if (version == C3_PROTOCOL_VERSION &&
       (bits == 16 || bits == 24 || bits == 32) &&
-      channels == 2 &&        // Strictly Stereo
-      sampleRate == 48000 &&  // Strictly 48 kHz
+      channels == 2 &&        
+      sampleRate == 48000 &&  
       frameSize == expectedFrameSize &&
       expectedFrameSize > 0) {
     streamFormat.sampleRate = sampleRate;
@@ -319,8 +316,7 @@ static bool parseC3HeaderIfPresent(const uint8_t *pkt, size_t len, size_t &paylo
   return false;
 }
 
-// DRAM Static buffers
-static uint8_t playbackIn[I2S_WRITE_BYTES / 2];
+static uint8_t playbackIn[I2S_WRITE_BYTES];
 
 static void playbackTask(void*) {
   for(;;){
@@ -344,7 +340,7 @@ static void playbackTask(void*) {
         int16_t *samples = reinterpret_cast<int16_t*>(playbackIn);
         size_t sampleCount = n / sizeof(int16_t);
         for (size_t i = 0; i < sampleCount; ++i) {
-          samples[i] = (int16_t)(((int32_t)samples[i] * volume) / 100);
+          samples[i] = (int16_t)(((int32_t)samples[i] * (int32_t)volume) / 100);
         }
       }
     } 
@@ -353,7 +349,7 @@ static void playbackTask(void*) {
         int32_t *samples = reinterpret_cast<int32_t*>(playbackIn);
         size_t sampleCount = n / sizeof(int32_t);
         for (size_t i = 0; i < sampleCount; ++i) {
-          samples[i] = (int32_t)(((int64_t)samples[i] * volume) / 100);
+          samples[i] = (int32_t)(((int64_t)samples[i] * (int64_t)volume) / 100);
         }
       }
     }
@@ -361,7 +357,6 @@ static void playbackTask(void*) {
     if (i2sMux) xSemaphoreTake(i2sMux, portMAX_DELAY);
     bool ready = i2sReady;
     size_t w = 0;
-    // Block cleanly until DMA frees up using portMAX_DELAY
     esp_err_t r = ready ? i2s_write(I2S_NUM_0, writeBuf, writeLen, &w, portMAX_DELAY) : ESP_FAIL;
     if (i2sMux) xSemaphoreGive(i2sMux);
 
